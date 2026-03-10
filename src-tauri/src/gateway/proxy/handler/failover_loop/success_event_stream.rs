@@ -3,6 +3,7 @@
 use super::super::super::gemini_oauth;
 use super::*;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_success_event_stream(
     ctx: CommonCtx<'_>,
     provider_ctx: ProviderCtx<'_>,

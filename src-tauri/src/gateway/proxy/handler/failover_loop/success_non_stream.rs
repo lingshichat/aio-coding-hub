@@ -4,6 +4,7 @@ use super::super::super::{gemini_oauth, provider_router, GatewayErrorCode};
 use super::*;
 use crate::shared::mutex_ext::MutexExt;
 
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn handle_success_non_stream(
     ctx: CommonCtx<'_>,
     provider_ctx: ProviderCtx<'_>,

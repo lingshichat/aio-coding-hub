@@ -324,6 +324,11 @@ fn read_json_top_level_str(path: &std::path::Path, key: &str) -> Option<String> 
 }
 
 /// Extract a value from TOML like `key = "value"`.
+///
+/// NOTE: This is a simple line-based parser that assumes Codex `config.toml`
+/// consists of flat top-level `key = "value"` entries only (no sections, no
+/// inline tables, no multi-line values). If the format grows more complex,
+/// replace with the `toml` crate.
 fn extract_toml_value(content: &str, key: &str) -> Option<String> {
     for line in content.lines() {
         let trimmed = line.trim();
@@ -359,15 +364,29 @@ fn extract_env_value(content: &str, key: &str) -> Option<String> {
     None
 }
 
-/// Write file and force sync to disk (critical for UNC/9P paths during exit).
+/// Write file atomically and force sync to disk (critical for UNC/9P paths during exit).
+///
+/// Writes to a `.aio-tmp` sibling first, syncs, then renames over the target.
+/// This prevents config corruption if the process is killed mid-write.
 fn write_file_synced(path: &std::path::Path, data: &[u8]) -> AppResult<()> {
     use std::io::Write;
-    let mut file = std::fs::File::create(path)
-        .map_err(|e| format!("failed to create {}: {e}", path.display()))?;
+    let file_name = path.file_name().and_then(|v| v.to_str()).unwrap_or("file");
+    let tmp_path = path.with_file_name(format!("{file_name}.aio-tmp"));
+
+    let mut file = std::fs::File::create(&tmp_path)
+        .map_err(|e| format!("failed to create {}: {e}", tmp_path.display()))?;
     file.write_all(data)
-        .map_err(|e| format!("failed to write {}: {e}", path.display()))?;
+        .map_err(|e| format!("failed to write {}: {e}", tmp_path.display()))?;
     file.sync_all()
-        .map_err(|e| format!("failed to sync {}: {e}", path.display()))?;
+        .map_err(|e| format!("failed to sync {}: {e}", tmp_path.display()))?;
+    drop(file);
+
+    // Windows rename requires target not to exist.
+    if path.exists() {
+        let _ = std::fs::remove_file(path);
+    }
+    std::fs::rename(&tmp_path, path)
+        .map_err(|e| format!("failed to finalize {}: {e}", path.display()))?;
     Ok(())
 }
 
@@ -535,83 +554,6 @@ pub fn restore_wsl_clients(app: &tauri::AppHandle) -> AppResult<()> {
             }
         } else {
             tracing::warn!("WSL manifest for {distro} kept — some restores failed, will retry");
-        }
-    }
-    Ok(())
-}
-
-/// Fallback restore: remove known injected keys without relying on manifest.
-#[allow(dead_code)]
-pub fn restore_wsl_clients_fallback(_app: &tauri::AppHandle, distros: &[String]) -> AppResult<()> {
-    for distro in distros {
-        let home = match resolve_wsl_home_unc(distro) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::warn!("WSL fallback restore: cannot resolve home for {distro}: {e}");
-                continue;
-            }
-        };
-
-        // Claude: remove injected keys from settings.json
-        let claude_path = home.join(".claude").join("settings.json");
-        if claude_path.exists() {
-            if let Ok(bytes) = std::fs::read(&claude_path) {
-                if let Ok(mut data) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    if let Some(env) = data.get_mut("env").and_then(|v| v.as_object_mut()) {
-                        env.remove("ANTHROPIC_BASE_URL");
-                        env.remove("ANTHROPIC_AUTH_TOKEN");
-                    }
-                    if let Ok(out) = serde_json::to_string_pretty(&data) {
-                        let _ = std::fs::write(&claude_path, format!("{out}\n"));
-                    }
-                }
-            }
-        }
-
-        // Codex: remove injected keys
-        let codex_home = home.join(".codex");
-        let toml_path = codex_home.join("config.toml");
-        if toml_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&toml_path) {
-                let lines: Vec<&str> = content
-                    .lines()
-                    .filter(|l| {
-                        let t = l.trim();
-                        !t.starts_with("preferred_auth_method") && !t.starts_with("model_provider")
-                    })
-                    .collect();
-                let _ = std::fs::write(&toml_path, lines.join("\n") + "\n");
-            }
-        }
-        let auth_path = codex_home.join("auth.json");
-        if auth_path.exists() {
-            if let Ok(bytes) = std::fs::read(&auth_path) {
-                if let Ok(mut data) = serde_json::from_slice::<serde_json::Value>(&bytes) {
-                    if let Some(obj) = data.as_object_mut() {
-                        obj.remove("OPENAI_API_KEY");
-                    }
-                    if let Ok(out) = serde_json::to_string_pretty(&data) {
-                        let _ = std::fs::write(&auth_path, format!("{out}\n"));
-                    }
-                }
-            }
-        }
-
-        // Gemini: remove injected keys from .env
-        let gemini_env = home.join(".gemini").join(".env");
-        if gemini_env.exists() {
-            if let Ok(content) = std::fs::read_to_string(&gemini_env) {
-                let lines: Vec<&str> = content
-                    .lines()
-                    .filter(|l| {
-                        let t = l.trim();
-                        let check = t.strip_prefix("export ").unwrap_or(t);
-                        !check.starts_with("GOOGLE_GEMINI_BASE_URL=")
-                            && !check.starts_with("GEMINI_API_KEY=")
-                    })
-                    .collect();
-                let _ = std::fs::write(&gemini_env, lines.join("\n") + "\n");
-            }
         }
     }
     Ok(())

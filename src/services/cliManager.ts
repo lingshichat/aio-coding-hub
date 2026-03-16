@@ -43,6 +43,7 @@ export type ClaudeSettingsState = {
   spinner_tips_enabled: boolean | null;
   terminal_progress_bar_enabled: boolean | null;
   respect_gitignore: boolean | null;
+  disable_git_participant: boolean;
 
   permissions_allow: string[];
   permissions_ask: string[];
@@ -75,6 +76,7 @@ export type ClaudeSettingsPatch = Partial<{
   spinner_tips_enabled: boolean;
   terminal_progress_bar_enabled: boolean;
   respect_gitignore: boolean;
+  disable_git_participant: boolean;
 
   permissions_allow: string[];
   permissions_ask: string[];

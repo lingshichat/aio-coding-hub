@@ -37,6 +37,7 @@ pub struct ClaudeSettingsState {
     pub spinner_tips_enabled: Option<bool>,
     pub terminal_progress_bar_enabled: Option<bool>,
     pub respect_gitignore: Option<bool>,
+    pub disable_git_participant: bool,
 
     pub permissions_allow: Vec<String>,
     pub permissions_ask: Vec<String>,
@@ -70,6 +71,7 @@ pub struct ClaudeSettingsPatch {
     pub spinner_tips_enabled: Option<bool>,
     pub terminal_progress_bar_enabled: Option<bool>,
     pub respect_gitignore: Option<bool>,
+    pub disable_git_participant: Option<bool>,
 
     pub permissions_allow: Option<Vec<String>>,
     pub permissions_ask: Option<Vec<String>>,
@@ -201,6 +203,16 @@ fn parse_string_list(value: Option<&serde_json::Value>) -> Vec<String> {
     }
 }
 
+fn git_participant_is_disabled(value: Option<&serde_json::Value>) -> bool {
+    value
+        .and_then(|v| v.as_object())
+        .map(|attr| {
+            attr.get("commit").and_then(|v| v.as_str()) == Some("")
+                && attr.get("pr").and_then(|v| v.as_str()) == Some("")
+        })
+        .unwrap_or(false)
+}
+
 fn env_string_value(value: &serde_json::Value) -> Option<String> {
     match value {
         serde_json::Value::String(s) => Some(s.trim().to_string()),
@@ -252,6 +264,7 @@ pub fn claude_settings_get<R: tauri::Runtime>(
     let permissions_allow = parse_string_list(permissions.and_then(|p| p.get("allow")));
     let permissions_ask = parse_string_list(permissions.and_then(|p| p.get("ask")));
     let permissions_deny = parse_string_list(permissions.and_then(|p| p.get("deny")));
+    let disable_git_participant = git_participant_is_disabled(obj.get("attribution"));
 
     let env = obj.get("env").and_then(|v| v.as_object());
     let env_mcp_timeout_ms = env
@@ -317,6 +330,7 @@ pub fn claude_settings_get<R: tauri::Runtime>(
             .get("terminalProgressBarEnabled")
             .and_then(|v| v.as_bool()),
         respect_gitignore: obj.get("respectGitignore").and_then(|v| v.as_bool()),
+        disable_git_participant,
 
         permissions_allow,
         permissions_ask,
@@ -395,6 +409,49 @@ fn patch_env_bool_toggle(
     }
 }
 
+fn patch_git_attribution(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    disabled: bool,
+) -> crate::shared::error::AppResult<()> {
+    if disabled {
+        let entry = obj
+            .entry("attribution".to_string())
+            .or_insert_with(|| serde_json::Value::Object(Default::default()));
+        if !entry.is_object() {
+            *entry = serde_json::Value::Object(Default::default());
+        }
+
+        let attribution = entry
+            .as_object_mut()
+            .ok_or_else(|| "settings.json attribution must be an object".to_string())?;
+        attribution.insert(
+            "commit".to_string(),
+            serde_json::Value::String(String::new()),
+        );
+        attribution.insert("pr".to_string(), serde_json::Value::String(String::new()));
+        return Ok(());
+    }
+
+    let should_remove_attribution = match obj.get_mut("attribution") {
+        Some(entry) if entry.is_object() => {
+            let attribution = entry
+                .as_object_mut()
+                .ok_or_else(|| "settings.json attribution must be an object".to_string())?;
+            attribution.remove("commit");
+            attribution.remove("pr");
+            attribution.is_empty()
+        }
+        Some(_) => true,
+        None => false,
+    };
+
+    if should_remove_attribution {
+        obj.remove("attribution");
+    }
+
+    Ok(())
+}
+
 fn patch_claude_settings(
     mut root: serde_json::Value,
     patch: ClaudeSettingsPatch,
@@ -434,6 +491,9 @@ fn patch_claude_settings(
     }
     if let Some(v) = patch.respect_gitignore {
         obj.insert("respectGitignore".to_string(), serde_json::Value::Bool(v));
+    }
+    if let Some(v) = patch.disable_git_participant {
+        patch_git_attribution(obj, v)?;
     }
 
     let has_permission_patch = patch.permissions_allow.is_some()
@@ -602,6 +662,7 @@ fn patch_has_updates(patch: &ClaudeSettingsPatch) -> bool {
         || patch.spinner_tips_enabled.is_some()
         || patch.terminal_progress_bar_enabled.is_some()
         || patch.respect_gitignore.is_some()
+        || patch.disable_git_participant.is_some()
         || patch.permissions_allow.is_some()
         || patch.permissions_ask.is_some()
         || patch.permissions_deny.is_some()

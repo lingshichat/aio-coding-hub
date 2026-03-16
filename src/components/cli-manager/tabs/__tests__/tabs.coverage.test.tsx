@@ -36,6 +36,7 @@ describe("cli-manager tabs (coverage)", () => {
           spinner_tips_enabled: true,
           terminal_progress_bar_enabled: true,
           respect_gitignore: true,
+          disable_git_participant: false,
           permissions_allow: ["ReadFile"],
           permissions_ask: [],
           permissions_deny: ["WriteFile"],

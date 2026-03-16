@@ -36,6 +36,7 @@ function createClaudeSettings(overrides: Partial<any> = {}) {
     spinner_tips_enabled: null,
     terminal_progress_bar_enabled: null,
     respect_gitignore: null,
+    disable_git_participant: false,
     permissions_allow: ["Read(./docs/**)"],
     permissions_ask: [],
     permissions_deny: [],
@@ -121,6 +122,12 @@ describe("components/cli-manager/tabs/ClaudeTab", () => {
     fireEvent.change(languageInput, { target: { value: "  english  " } });
     fireEvent.blur(languageInput);
     expect(persistClaudeSettings).toHaveBeenCalledWith({ language: "english" });
+
+    const disableGitParticipantItem =
+      screen.getByText("关闭 Claude Git 参与者").parentElement?.parentElement;
+    expect(disableGitParticipantItem).toBeTruthy();
+    fireEvent.click(within(disableGitParticipantItem as HTMLElement).getByRole("switch"));
+    expect(persistClaudeSettings).toHaveBeenCalledWith({ disable_git_participant: true });
 
     // permissions.allow parses lines on blur
     const allowItem = screen.getByText("permissions.allow").parentElement?.parentElement;

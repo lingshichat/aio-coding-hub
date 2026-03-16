@@ -603,6 +603,19 @@ export function CliManagerClaudeTab({
                     disabled={saving}
                   />
                 </SettingItem>
+
+                <SettingItem
+                  label="关闭 Claude Git 参与者"
+                  subtitle="开启后会写入 attribution.commit / attribution.pr 为空字符串，隐藏 Git commit / PR 里的 Claude 标记；关闭后删除这两个字段。"
+                >
+                  <Switch
+                    checked={claudeSettings.disable_git_participant}
+                    onCheckedChange={(checked) =>
+                      void persistClaudeSettings({ disable_git_participant: checked })
+                    }
+                    disabled={saving}
+                  />
+                </SettingItem>
               </div>
             </div>
 

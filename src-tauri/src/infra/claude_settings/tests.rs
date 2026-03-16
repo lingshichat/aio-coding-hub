@@ -10,6 +10,7 @@ fn empty_patch() -> ClaudeSettingsPatch {
         spinner_tips_enabled: None,
         terminal_progress_bar_enabled: None,
         respect_gitignore: None,
+        disable_git_participant: None,
         permissions_allow: None,
         permissions_ask: None,
         permissions_deny: None,
@@ -118,6 +119,74 @@ fn patch_env_attribution_header_can_write_one_and_remove_key() {
         "{patched}"
     );
     assert_eq!(env.get("KEEP").and_then(|v| v.as_str()), Some("x"));
+}
+
+#[test]
+fn patch_git_attribution_can_write_and_remove_keys() {
+    let input = serde_json::json!({
+      "attribution": {
+        "commit": "Claude Code",
+        "pr": "Claude Code",
+        "keep": "x"
+      },
+      "other": true
+    });
+
+    let patched = patch_claude_settings(
+        input,
+        ClaudeSettingsPatch {
+            disable_git_participant: Some(true),
+            ..empty_patch()
+        },
+    )
+    .expect("patch");
+
+    let attribution = patched
+        .get("attribution")
+        .and_then(|v| v.as_object())
+        .expect("attribution object");
+    assert_eq!(attribution.get("commit").and_then(|v| v.as_str()), Some(""));
+    assert_eq!(attribution.get("pr").and_then(|v| v.as_str()), Some(""));
+    assert_eq!(attribution.get("keep").and_then(|v| v.as_str()), Some("x"));
+
+    let patched = patch_claude_settings(
+        patched,
+        ClaudeSettingsPatch {
+            disable_git_participant: Some(false),
+            ..empty_patch()
+        },
+    )
+    .expect("patch");
+
+    let attribution = patched
+        .get("attribution")
+        .and_then(|v| v.as_object())
+        .expect("attribution object");
+    assert!(attribution.get("commit").is_none(), "{patched}");
+    assert!(attribution.get("pr").is_none(), "{patched}");
+    assert_eq!(attribution.get("keep").and_then(|v| v.as_str()), Some("x"));
+    assert_eq!(patched.get("other").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[test]
+fn patch_git_attribution_removes_empty_object() {
+    let input = serde_json::json!({
+      "attribution": {
+        "commit": "",
+        "pr": ""
+      }
+    });
+
+    let patched = patch_claude_settings(
+        input,
+        ClaudeSettingsPatch {
+            disable_git_participant: Some(false),
+            ..empty_patch()
+        },
+    )
+    .expect("patch");
+
+    assert!(patched.get("attribution").is_none(), "{patched}");
 }
 
 #[test]

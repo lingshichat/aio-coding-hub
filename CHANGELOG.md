@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.32.2](https://github.com/dyndynjyxa/aio-coding-hub/compare/aio-coding-hub-v0.32.1...aio-coding-hub-v0.32.2) (2026-03-16)
+
+
+### Features
+
+* **build:** 添加Wayland兼容的AppImage构建支持 ([95c7130](https://github.com/dyndynjyxa/aio-coding-hub/commit/95c71307038962fc0e37fbd7b6df844301d8decb))
+* **cli_proxy:** 添加 merge-restore 功能以保留用户更改 ([a7d05c9](https://github.com/dyndynjyxa/aio-coding-hub/commit/a7d05c97fe1228d83ccf97be5ed9b6ec26c7bde0))
+* **settings:** 新增关闭 Claude Git 参与者功能 ([cf23f0d](https://github.com/dyndynjyxa/aio-coding-hub/commit/cf23f0dec000cff63f222b0198360485deb60804))
+* **wsl:** 添加 WSL 配置生命周期管理 — 退出恢复与崩溃自愈 ([bcbf54d](https://github.com/dyndynjyxa/aio-coding-hub/commit/bcbf54df5bf1e6b851f223ffad2a0ee135647c13))
+
+
+### Bug Fixes
+
+* suppress dead_code warnings on non-Windows CI and fix clippy lint ([8371047](https://github.com/dyndynjyxa/aio-coding-hub/commit/8371047c8a09fbf448f9aa11babc0fafe8b15f20))
+* **wsl:** atomic write, remove dead fallback, add TOML comment ([7decfb5](https://github.com/dyndynjyxa/aio-coding-hub/commit/7decfb5803378ee3bfb5433bc88adb64562a6857))
+
 ## [0.32.1](https://github.com/dyndynjyxa/aio-coding-hub/compare/aio-coding-hub-v0.32.0...aio-coding-hub-v0.32.1) (2026-03-15)
 
 

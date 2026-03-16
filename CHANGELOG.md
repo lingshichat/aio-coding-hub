@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.32.4](https://github.com/dyndynjyxa/aio-coding-hub/compare/aio-coding-hub-v0.32.3...aio-coding-hub-v0.32.4) (2026-03-16)
+
+
+### Bug Fixes
+
+* **ci:** 修复release.yml中AppImage路径解析问题 ([1876bd4](https://github.com/dyndynjyxa/aio-coding-hub/commit/1876bd428f888e9c2eb286a20b9aeeb00dda5c5a))
+
 ## [0.32.3](https://github.com/dyndynjyxa/aio-coding-hub/compare/aio-coding-hub-v0.32.2...aio-coding-hub-v0.32.3) (2026-03-16)
 
 

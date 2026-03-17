@@ -290,7 +290,7 @@ describe("pages/providers/ProviderEditorDialog", () => {
     expect(opusInput).toHaveValue("glm-main");
   });
 
-  it("always overwrites haiku sonnet opus when main model changes", () => {
+  it("preserves custom haiku value when main model changes again", () => {
     render(
       <ProviderEditorDialog
         mode="create"
@@ -313,7 +313,9 @@ describe("pages/providers/ProviderEditorDialog", () => {
     fireEvent.change(haikuInput, { target: { value: "glm-haiku-custom" } });
     fireEvent.change(mainInput, { target: { value: "glm-main-b" } });
 
-    expect(haikuInput).toHaveValue("glm-main-b");
+    // haiku was customized so it should NOT be overwritten
+    expect(haikuInput).toHaveValue("glm-haiku-custom");
+    // sonnet and opus still matched old main_model, so they sync
     expect(sonnetInput).toHaveValue("glm-main-b");
     expect(opusInput).toHaveValue("glm-main-b");
   });

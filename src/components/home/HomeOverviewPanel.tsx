@@ -113,6 +113,7 @@ export function HomeOverviewPanel({
   sortModesAvailable,
   activeModeByCli,
   activeModeToggling,
+  onSetCliActiveMode,
   cliProxyEnabled,
   cliProxyToggling,
   onSetCliProxyEnabled,
@@ -209,6 +210,7 @@ export function HomeOverviewPanel({
                 sortModesAvailable={sortModesAvailable}
                 activeModeByCli={activeModeByCli}
                 activeModeToggling={activeModeToggling}
+                onSetCliActiveMode={onSetCliActiveMode}
                 cliProxyEnabled={cliProxyEnabled}
                 cliProxyToggling={cliProxyToggling}
                 onSetCliProxyEnabled={onSetCliProxyEnabled}
@@ -225,6 +227,7 @@ export function HomeOverviewPanel({
                 sortModesAvailable={sortModesAvailable}
                 activeModeByCli={activeModeByCli}
                 activeModeToggling={activeModeToggling}
+                onSetCliActiveMode={onSetCliActiveMode}
                 cliProxyEnabled={cliProxyEnabled}
                 cliProxyToggling={cliProxyToggling}
                 onSetCliProxyEnabled={onSetCliProxyEnabled}

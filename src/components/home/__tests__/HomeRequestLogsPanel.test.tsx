@@ -1,12 +1,15 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 import type { RequestLogSummary } from "../../../services/requestLogs";
 import type { TraceSession } from "../../../services/traceStore";
 import { HomeRequestLogsPanel } from "../HomeRequestLogsPanel";
 
 describe("components/home/HomeRequestLogsPanel", () => {
+  afterEach(() => {
+    localStorage.removeItem("home_request_logs_compact");
+  });
   it("renders traces + logs and supports refresh/select", () => {
     const traces: TraceSession[] = [
       {

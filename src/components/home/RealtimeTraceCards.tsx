@@ -3,7 +3,7 @@
 // - Accepts a list of `TraceSession` candidates; component applies its own visibility + exit animation logic.
 
 import { memo, useEffect, useMemo, useState } from "react";
-import { cliBadgeTone, cliShortLabel } from "../../constants/clis";
+import { cliBadgeToneStatic, cliShortLabel } from "../../constants/clis";
 import { GatewayErrorCodes } from "../../constants/gatewayErrorCodes";
 import type { CliKey } from "../../services/providers";
 import type { TraceSession } from "../../services/traceStore";
@@ -190,11 +190,7 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
             ? trace.requested_model.trim()
             : "未知";
         const cliLabel = cliShortLabel(trace.cli_key);
-        const cliTone = cliBadgeTone(trace.cli_key)
-          .replace(/group-hover:bg-white/g, "")
-          .replace(/dark:group-hover:bg-slate-800/g, "")
-          .replace(/group-hover:border-slate-200/g, "")
-          .replace(/dark:group-hover:border-slate-700/g, "");
+        const cliTone = cliBadgeToneStatic(trace.cli_key);
 
         const cacheWrite = (() => {
           const s = trace.summary;

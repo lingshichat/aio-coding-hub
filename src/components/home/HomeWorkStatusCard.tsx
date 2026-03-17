@@ -1,11 +1,14 @@
 // Usage:
 // - Render in `HomeOverviewPanel` left column to show each CLI's current workspace and proxy state.
 
+import { Fragment } from "react";
 import { CLIS } from "../../constants/clis";
 import type { CliKey } from "../../services/providers";
 import type { SortModeSummary } from "../../services/sortModes";
+import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { Switch } from "../../ui/Switch";
+import { cn } from "../../utils/cn";
 import { CliBrandIcon } from "./CliBrandIcon";
 
 export type HomeWorkStatusCardProps = {
@@ -15,6 +18,7 @@ export type HomeWorkStatusCardProps = {
   sortModesAvailable: boolean | null;
   activeModeByCli: Record<CliKey, number | null>;
   activeModeToggling: Record<CliKey, boolean>;
+  onSetCliActiveMode: (cliKey: CliKey, modeId: number | null) => void;
 
   cliProxyEnabled: Record<CliKey, boolean>;
   cliProxyToggling: Record<CliKey, boolean>;
@@ -28,11 +32,17 @@ export function HomeWorkStatusCard({
   sortModesAvailable,
   activeModeByCli,
   activeModeToggling,
+  onSetCliActiveMode,
   cliProxyEnabled,
   cliProxyToggling,
   onSetCliProxyEnabled,
 }: HomeWorkStatusCardProps) {
   const horizontal = layout === "horizontal";
+
+  const options: Array<{ id: number | null; label: string }> = [
+    { id: null, label: "Default" },
+    ...sortModes.map((m) => ({ id: m.id, label: m.name })),
+  ];
 
   return (
     <Card padding="sm" className="flex h-full flex-1 flex-col">
@@ -53,13 +63,7 @@ export function HomeWorkStatusCard({
           {CLIS.map((cli) => {
             const cliKey = cli.key as CliKey;
             const activeModeId = activeModeByCli[cliKey] ?? null;
-            const workspaceLabel =
-              activeModeToggling[cliKey] || sortModesLoading
-                ? "加载中…"
-                : activeModeId == null
-                  ? "Default"
-                  : (sortModes.find((mode) => mode.id === activeModeId)?.name ??
-                    `#${activeModeId}`);
+            const modeDisabled = activeModeToggling[cliKey] || sortModesLoading;
 
             return (
               <div
@@ -68,11 +72,10 @@ export function HomeWorkStatusCard({
               >
                 <div className="flex items-center justify-between gap-3">
                   <div
-                    className={
-                      horizontal
-                        ? "flex min-w-0 items-center gap-2 text-left text-xs font-medium text-slate-700 dark:text-slate-300"
-                        : "min-w-0 flex flex-1 items-center gap-2 text-left text-xs font-medium text-slate-700 dark:text-slate-300"
-                    }
+                    className={cn(
+                      "min-w-0 flex items-center gap-2 text-left text-xs font-medium text-slate-700 dark:text-slate-300",
+                      !horizontal && "flex-1"
+                    )}
                   >
                     <CliBrandIcon
                       cliKey={cliKey}
@@ -81,19 +84,7 @@ export function HomeWorkStatusCard({
                     <span className="truncate">{cli.name}</span>
                   </div>
 
-                  <div
-                    className={
-                      horizontal
-                        ? "flex shrink-0 items-center justify-end gap-2"
-                        : "flex shrink-0 items-center justify-end gap-2"
-                    }
-                  >
-                    <span
-                      className="max-w-[140px] rounded-full border border-slate-200 bg-slate-50 px-2 py-0.5 text-xs font-medium text-slate-700 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300"
-                      title={`当前工作区：${workspaceLabel}`}
-                    >
-                      <span className="block truncate">{workspaceLabel}</span>
-                    </span>
+                  <div className="flex shrink-0 items-center justify-end gap-2">
                     <Switch
                       checked={cliProxyEnabled[cliKey]}
                       disabled={cliProxyToggling[cliKey]}
@@ -102,6 +93,26 @@ export function HomeWorkStatusCard({
                       aria-label={`${cli.name} 代理开关`}
                     />
                   </div>
+                </div>
+
+                <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                  {options.map((opt, idx) => {
+                    const active = activeModeId === opt.id;
+                    const key = opt.id == null ? "default" : String(opt.id);
+                    return (
+                      <Fragment key={key}>
+                        {idx > 0 && <span className="text-slate-200 dark:text-slate-600">|</span>}
+                        <Button
+                          onClick={() => onSetCliActiveMode(cliKey, opt.id)}
+                          variant={active ? "primary" : "secondary"}
+                          size="sm"
+                          disabled={modeDisabled}
+                        >
+                          {opt.label}
+                        </Button>
+                      </Fragment>
+                    );
+                  })}
                 </div>
               </div>
             );

@@ -1115,13 +1115,20 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
                   value={claudeModels.main_model ?? ""}
                   onChange={(e) => {
                     const value = e.currentTarget.value;
-                    setClaudeModels((prev) => ({
-                      ...prev,
-                      main_model: value,
-                      haiku_model: value,
-                      sonnet_model: value,
-                      opus_model: value,
-                    }));
+                    setClaudeModels((prev) => {
+                      const oldMain = (prev.main_model ?? "").trim();
+                      const syncIfMatch = (field: string | null | undefined) => {
+                        const trimmed = (field ?? "").trim();
+                        return !trimmed || trimmed === oldMain ? value : field;
+                      };
+                      return {
+                        ...prev,
+                        main_model: value,
+                        haiku_model: syncIfMatch(prev.haiku_model),
+                        sonnet_model: syncIfMatch(prev.sonnet_model),
+                        opus_model: syncIfMatch(prev.opus_model),
+                      };
+                    });
                   }}
                   placeholder="例如: glm-4-plus / minimax-text-01 / kimi-k2"
                   disabled={saving}

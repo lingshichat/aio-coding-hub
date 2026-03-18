@@ -2,19 +2,14 @@
 // - Used by `HomeRequestLogsPanel` to show the selected request log detail.
 // - Keeps the dialog UI isolated from the main overview panel to reduce file size and improve cohesion.
 
-import { toast } from "sonner";
 import { cliBadgeTone, cliShortLabel } from "../../constants/clis";
-import { copyText } from "../../services/clipboard";
-import { logToConsole } from "../../services/consoleLog";
 import type { RequestAttemptLog, RequestLogDetail } from "../../services/requestLogs";
-import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
 import { Dialog } from "../../ui/Dialog";
 import { cn } from "../../utils/cn";
 import {
   computeOutputTokensPerSecond,
   formatDurationMs,
-  formatRelativeTimeFromUnixSeconds,
   formatTokensPerSecond,
   formatUsdRaw,
   sanitizeTtfbMs,
@@ -42,28 +37,39 @@ export function RequestLogDetailDialog({
   attemptLogs,
   attemptLogsLoading,
 }: RequestLogDetailDialogProps) {
-  function formatUnixSeconds(ts: number) {
-    return formatRelativeTimeFromUnixSeconds(ts);
-  }
-
   const finalProviderText = resolveProviderLabel(
     selectedLog?.final_provider_name,
     selectedLog?.final_provider_id
   );
 
-  const sourceProviderText = resolveProviderLabel(
-    selectedLog?.final_provider_source_name,
-    selectedLog?.final_provider_source_id
-  );
+  const statusBadge = selectedLog
+    ? computeStatusBadge({
+        status: selectedLog.status,
+        errorCode: selectedLog.error_code,
+        hasFailover: attemptLogs.length > 1,
+      })
+    : null;
 
+  const hasTokens =
+    selectedLog != null &&
+    (selectedLog.input_tokens != null ||
+      selectedLog.output_tokens != null ||
+      selectedLog.total_tokens != null ||
+      selectedLog.cache_read_input_tokens != null ||
+      selectedLog.cache_creation_input_tokens != null ||
+      selectedLog.cache_creation_5m_input_tokens != null ||
+      selectedLog.cache_creation_1h_input_tokens != null ||
+      selectedLog.cost_usd != null ||
+      selectedLog.duration_ms != null ||
+      selectedLog.ttfb_ms != null);
   return (
     <Dialog
       open={selectedLogId != null}
       onOpenChange={(open) => {
         if (!open) onSelectLogId(null);
       }}
-      title="使用记录"
-      description="点击列表项查看详情（trace_id / failover attempts / error_code）。"
+      title="日志详情"
+      description="先看关键指标，再看为什么会重试、跳过或切换供应商。"
       className="max-w-3xl"
     >
       {selectedLogLoading ? (
@@ -74,124 +80,79 @@ export function RequestLogDetailDialog({
         </div>
       ) : (
         <div className="space-y-3">
-          <Card padding="sm">
-            <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
-              <div className="min-w-0">
-                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                  <span className="mr-2 font-mono text-xs text-slate-500 dark:text-slate-400">
-                    {selectedLog.method.toUpperCase()}
-                  </span>
-                  <span className="truncate">{selectedLog.path}</span>
+          {hasTokens ? (
+            <Card padding="sm">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    关键指标
+                  </div>
+                  <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    这次请求的输入输出、缓存、耗时与花费。
+                  </div>
                 </div>
-                <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                {statusBadge ? (
                   <span
-                    className={cn(
-                      "rounded-full px-2 py-0.5 font-medium",
-                      cliBadgeTone(selectedLog.cli_key)
-                    )}
+                    className={cn("rounded-full px-2.5 py-1 text-xs font-medium", statusBadge.tone)}
+                    title={statusBadge.title}
                   >
-                    {cliShortLabel(selectedLog.cli_key)}
+                    {statusBadge.text}
                   </span>
-                  {(() => {
-                    const badge = computeStatusBadge({
-                      status: selectedLog.status,
-                      errorCode: selectedLog.error_code,
-                    });
-                    return (
-                      <span
-                        className={cn("rounded-full px-2 py-0.5 font-medium", badge.tone)}
-                        title={badge.title}
-                      >
-                        {badge.text}
-                      </span>
-                    );
-                  })()}
-                  {selectedLog.error_code ? (
-                    <span className="rounded-full bg-amber-50 dark:bg-amber-900/30 px-2 py-0.5 font-medium text-amber-700 dark:text-amber-400">
-                      {selectedLog.error_code}
-                    </span>
-                  ) : null}
-                  {finalProviderText ? (
-                    <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5">
-                      Provider {finalProviderText}
-                    </span>
-                  ) : null}
-                  {sourceProviderText ? (
-                    <span className="rounded-full bg-violet-50 dark:bg-violet-900/30 px-2 py-0.5 font-mono text-violet-700 dark:text-violet-300">
-                      source: {sourceProviderText}
-                    </span>
-                  ) : null}
-                  <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5">
-                    耗时 {formatDurationMs(selectedLog.duration_ms)}
-                  </span>
-                  <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5">
-                    成本 {formatUsdRaw(selectedLog.cost_usd)}
-                    {(() => {
-                      const m = selectedLog.cost_multiplier;
-                      const show = Number.isFinite(m) && m >= 0 && Math.abs(m - 1) > 0.0001;
-                      return show ? (
-                        <span className="ml-1 text-slate-500 dark:text-slate-400">
-                          (x{m.toFixed(2)})
-                        </span>
-                      ) : null;
-                    })()}
-                  </span>
-                  {(() => {
+                ) : null}
+              </div>
+
+              <div className="mt-3 grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+                <MetricCard label="输入 Token" value={selectedLog.input_tokens} />
+                <MetricCard label="输出 Token" value={selectedLog.output_tokens} />
+                <MetricCard label="缓存创建" value={resolveCacheWriteValue(selectedLog)} />
+                <MetricCard label="缓存读取" value={selectedLog.cache_read_input_tokens} />
+                <MetricCard label="总耗时" value={formatDurationMs(selectedLog.duration_ms)} />
+                <MetricCard
+                  label="TTFB"
+                  value={(() => {
                     const ttfbMs = sanitizeTtfbMs(selectedLog.ttfb_ms, selectedLog.duration_ms);
-                    return ttfbMs != null ? (
-                      <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5">
-                        首字 {formatDurationMs(ttfbMs)}
-                      </span>
-                    ) : null;
+                    return ttfbMs != null ? formatDurationMs(ttfbMs) : "—";
                   })()}
-                  {(() => {
+                />
+                <MetricCard
+                  label="速率"
+                  value={(() => {
                     const rate = computeOutputTokensPerSecond(
                       selectedLog.output_tokens,
                       selectedLog.duration_ms,
                       sanitizeTtfbMs(selectedLog.ttfb_ms, selectedLog.duration_ms)
                     );
-                    if (rate == null) return null;
-                    return (
-                      <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5">
-                        速率 {formatTokensPerSecond(rate)}
-                      </span>
-                    );
+                    return rate != null ? formatTokensPerSecond(rate) : "—";
                   })()}
-                  <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5">
-                    {formatUnixSeconds(selectedLog.created_at)}
-                  </span>
-                </div>
-                {selectedLog.query ? (
-                  <div className="mt-2 break-words text-xs text-slate-500 dark:text-slate-400">
-                    查询：<span className="font-mono">{selectedLog.query}</span>
-                  </div>
-                ) : null}
+                />
+                <MetricCard label="花费" value={formatUsdRaw(selectedLog.cost_usd)} />
               </div>
-
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  onClick={async () => {
-                    try {
-                      await copyText(selectedLog.trace_id);
-                      toast("已复制 trace_id");
-                    } catch (err) {
-                      logToConsole("error", "复制 trace_id 失败", {
-                        error: String(err),
-                      });
-                      toast("复制失败：当前环境不支持剪贴板");
-                    }
-                  }}
-                  variant="secondary"
-                >
-                  复制 trace_id
-                </Button>
-              </div>
-            </div>
-          </Card>
+            </Card>
+          ) : null}
 
           <Card padding="sm">
-            <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              故障切换尝试
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div>
+                <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                  决策链
+                </div>
+                <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                  用中文说明本次请求为何成功、失败、重试或切换供应商。
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
+                <span
+                  className={cn(
+                    "rounded-full px-2 py-0.5 font-medium",
+                    cliBadgeTone(selectedLog.cli_key)
+                  )}
+                >
+                  {cliShortLabel(selectedLog.cli_key)}
+                </span>
+                <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2 py-0.5">
+                  最终供应商：{finalProviderText || "未知"}
+                </span>
+              </div>
             </div>
             <ProviderChainView
               attemptLogs={attemptLogs}
@@ -199,108 +160,50 @@ export function RequestLogDetailDialog({
               attemptsJson={selectedLog.attempts_json}
             />
           </Card>
-
-          {(() => {
-            const hasTokens =
-              selectedLog.input_tokens != null ||
-              selectedLog.output_tokens != null ||
-              selectedLog.total_tokens != null ||
-              selectedLog.cache_read_input_tokens != null ||
-              selectedLog.cache_creation_input_tokens != null ||
-              selectedLog.cache_creation_5m_input_tokens != null;
-
-            if (!hasTokens && !selectedLog.usage_json) return null;
-
-            return (
-              <Card padding="sm">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-                    Token 用量
-                  </div>
-                  <div className="flex flex-wrap items-center gap-2">
-                    {selectedLog.usage_json ? (
-                      <Button
-                        onClick={async () => {
-                          try {
-                            await copyText(selectedLog.usage_json ?? "");
-                            toast("已复制 usage_json");
-                          } catch (err) {
-                            logToConsole("error", "复制 usage_json 失败", {
-                              error: String(err),
-                            });
-                            toast("复制失败：当前环境不支持剪贴板");
-                          }
-                        }}
-                        variant="secondary"
-                      >
-                        复制 usage_json
-                      </Button>
-                    ) : null}
-                  </div>
-                </div>
-
-                <div className="mt-3 grid gap-2 text-sm text-slate-700 dark:text-slate-300 sm:grid-cols-2">
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 dark:text-slate-400">input_tokens</span>
-                    <span className="font-mono">{selectedLog.input_tokens ?? "—"}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 dark:text-slate-400">output_tokens</span>
-                    <span className="font-mono">{selectedLog.output_tokens ?? "—"}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 dark:text-slate-400">total_tokens</span>
-                    <span className="font-mono">{selectedLog.total_tokens ?? "—"}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 dark:text-slate-400">
-                      cache_read_input_tokens
-                    </span>
-                    <span className="font-mono">{selectedLog.cache_read_input_tokens ?? "—"}</span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 dark:text-slate-400">
-                      cache_creation_input_tokens
-                    </span>
-                    <span className="font-mono">
-                      {selectedLog.cache_creation_input_tokens ?? "—"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 dark:text-slate-400">
-                      cache_creation_5m_input_tokens
-                    </span>
-                    <span className="font-mono">
-                      {selectedLog.cache_creation_5m_input_tokens ?? "—"}
-                    </span>
-                  </div>
-                  <div className="flex items-center justify-between">
-                    <span className="text-slate-500 dark:text-slate-400">
-                      cache_creation_1h_input_tokens
-                    </span>
-                    <span className="font-mono">
-                      {selectedLog.cache_creation_1h_input_tokens ?? "—"}
-                    </span>
-                  </div>
-                </div>
-
-                {selectedLog.usage_json ? (
-                  <pre className="mt-3 max-h-[240px] overflow-auto rounded-lg bg-slate-950 p-3 text-xs text-slate-100">
-                    {(() => {
-                      try {
-                        const parsed: unknown = JSON.parse(selectedLog.usage_json ?? "");
-                        return JSON.stringify(parsed, null, 2);
-                      } catch {
-                        return selectedLog.usage_json;
-                      }
-                    })()}
-                  </pre>
-                ) : null}
-              </Card>
-            );
-          })()}
         </div>
       )}
     </Dialog>
   );
+}
+
+function MetricCard({
+  label,
+  value,
+}: {
+  label: string;
+  value: string | number | null | undefined;
+}) {
+  return (
+    <div className="rounded-xl border border-slate-200/80 bg-slate-50/80 px-3 py-3 dark:border-slate-700 dark:bg-slate-800/70">
+      <div className="text-xs text-slate-500 dark:text-slate-400">{label}</div>
+      <div className="mt-1 text-lg font-semibold text-slate-900 dark:text-slate-100">
+        {value == null || value === "" ? "—" : value}
+      </div>
+    </div>
+  );
+}
+
+function resolveCacheWriteValue(selectedLog: RequestLogDetail) {
+  if (
+    selectedLog.cache_creation_5m_input_tokens != null &&
+    selectedLog.cache_creation_5m_input_tokens > 0
+  ) {
+    return `${selectedLog.cache_creation_5m_input_tokens} (5m)`;
+  }
+  if (
+    selectedLog.cache_creation_1h_input_tokens != null &&
+    selectedLog.cache_creation_1h_input_tokens > 0
+  ) {
+    return `${selectedLog.cache_creation_1h_input_tokens} (1h)`;
+  }
+  if (selectedLog.cache_creation_input_tokens != null) {
+    return selectedLog.cache_creation_input_tokens;
+  }
+  if (selectedLog.cache_creation_5m_input_tokens != null) {
+    return `${selectedLog.cache_creation_5m_input_tokens} (5m)`;
+  }
+  if (selectedLog.cache_creation_1h_input_tokens != null) {
+    return `${selectedLog.cache_creation_1h_input_tokens} (1h)`;
+  }
+  return "—";
 }

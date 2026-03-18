@@ -157,7 +157,11 @@ fn ir_to_request(ir: &InternalRequest) -> Result<Value, BridgeError> {
                     "type": "function",
                     "name": t.name,
                     "description": t.description,
-                    "parameters": params
+                    "parameters": params,
+                    // Claude Code tools rely on optional/conditional fields.
+                    // Responses API normalizes omitted `strict` schemas, which
+                    // can unintentionally over-constrain plan/team tools.
+                    "strict": false
                 })
             })
             .collect();
@@ -688,19 +692,161 @@ fn handle_response_completed(
 
 /// Remove unsupported `format: "uri"` from JSON schemas, recursively.
 fn clean_schema(schema: &mut Value) {
-    if let Some(obj) = schema.as_object_mut() {
-        if obj.get("format").and_then(|v| v.as_str()) == Some("uri") {
-            obj.remove("format");
-        }
-        if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
-            for val in props.values_mut() {
-                clean_schema(val);
+    match schema {
+        Value::Object(obj) => {
+            obj.remove("$schema");
+            obj.remove("default");
+            obj.remove("propertyNames");
+
+            if obj.get("format").and_then(|v| v.as_str()) == Some("uri") {
+                obj.remove("format");
+            }
+
+            if let Some(Value::Array(variants)) = obj.get_mut("anyOf") {
+                for variant in variants.iter_mut() {
+                    clean_schema(variant);
+                }
+            }
+            if let Some(Value::Array(variants)) = obj.get_mut("oneOf") {
+                for variant in variants.iter_mut() {
+                    clean_schema(variant);
+                }
+            }
+            if let Some(Value::Array(variants)) = obj.get_mut("allOf") {
+                for variant in variants.iter_mut() {
+                    clean_schema(variant);
+                }
+            }
+
+            simplify_enum_union(obj);
+            normalize_additional_properties(obj);
+
+            if let Some(props) = obj.get_mut("properties").and_then(|v| v.as_object_mut()) {
+                for val in props.values_mut() {
+                    clean_schema(val);
+                }
+            }
+            if let Some(items) = obj.get_mut("items") {
+                clean_schema(items);
             }
         }
-        if let Some(items) = obj.get_mut("items") {
-            clean_schema(items);
+        Value::Array(items) => {
+            for item in items {
+                clean_schema(item);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn normalize_additional_properties(obj: &mut serde_json::Map<String, Value>) {
+    let Some(additional_properties) = obj.get_mut("additionalProperties") else {
+        return;
+    };
+
+    match additional_properties {
+        Value::Object(map) if map.is_empty() => {
+            *additional_properties = Value::Bool(true);
+        }
+        Value::Object(_) | Value::Array(_) => clean_schema(additional_properties),
+        _ => {}
+    }
+}
+
+fn simplify_enum_union(obj: &mut serde_json::Map<String, Value>) {
+    let variants = match obj.get("anyOf").and_then(Value::as_array) {
+        Some(variants) if !variants.is_empty() => variants,
+        _ => {
+            normalize_const_enum(obj);
+            return;
+        }
+    };
+
+    let mut enum_values = Vec::new();
+    let mut common_type: Option<String> = None;
+
+    for variant in variants {
+        let Some(variant_obj) = variant.as_object() else {
+            return;
+        };
+
+        let variant_type = variant_obj
+            .get("type")
+            .and_then(Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                variant_obj
+                    .get("const")
+                    .map(|const_value| match const_value {
+                        Value::String(_) => "string".to_string(),
+                        Value::Bool(_) => "boolean".to_string(),
+                        Value::Number(_) => "number".to_string(),
+                        _ => "string".to_string(),
+                    })
+            });
+
+        match (&common_type, &variant_type) {
+            (Some(expected), Some(actual)) if expected != actual => return,
+            (None, Some(actual)) => common_type = Some(actual.clone()),
+            _ => {}
+        }
+
+        if let Some(values) = variant_obj.get("enum").and_then(Value::as_array) {
+            enum_values.extend(values.iter().cloned());
+            continue;
+        }
+        if let Some(value) = variant_obj.get("const") {
+            enum_values.push(value.clone());
+            continue;
+        }
+        return;
+    }
+
+    if enum_values.is_empty() {
+        return;
+    }
+
+    dedupe_json_values(&mut enum_values);
+    obj.remove("anyOf");
+    if let Some(common_type) = common_type {
+        obj.insert("type".to_string(), Value::String(common_type));
+    }
+    obj.insert("enum".to_string(), Value::Array(enum_values));
+    obj.remove("const");
+}
+
+fn normalize_const_enum(obj: &mut serde_json::Map<String, Value>) {
+    let Some(const_value) = obj.remove("const") else {
+        return;
+    };
+
+    if obj.get("enum").is_none() {
+        obj.insert("enum".to_string(), Value::Array(vec![const_value.clone()]));
+    }
+
+    if obj.get("type").is_none() {
+        let type_name = match const_value {
+            Value::String(_) => Some("string"),
+            Value::Bool(_) => Some("boolean"),
+            Value::Number(_) => Some("number"),
+            Value::Array(_) => Some("array"),
+            Value::Object(_) => Some("object"),
+            Value::Null => None,
+        };
+        if let Some(type_name) = type_name {
+            obj.insert("type".to_string(), Value::String(type_name.to_string()));
         }
     }
+}
+
+fn dedupe_json_values(values: &mut Vec<Value>) {
+    let mut deduped = Vec::with_capacity(values.len());
+    for value in values.drain(..) {
+        if !deduped.iter().any(|existing| existing == &value) {
+            deduped.push(value);
+        }
+    }
+    *values = deduped;
 }
 
 // ---------------------------------------------------------------------------
@@ -945,6 +1091,7 @@ mod tests {
         let result = ir_to_request(&ir).unwrap();
         assert_eq!(result["tools"][0]["type"], "function");
         assert_eq!(result["tools"][0]["name"], "fetch_url");
+        assert_eq!(result["tools"][0]["strict"], false);
         // format: "uri" should be stripped
         assert!(result["tools"][0]["parameters"]["properties"]["url"]
             .get("format")
@@ -1491,6 +1638,56 @@ mod tests {
         });
         clean_schema(&mut schema);
         assert_eq!(schema["properties"]["ts"]["format"], "date-time");
+    }
+
+    #[test]
+    fn clean_schema_simplifies_plan_mode_keywords() {
+        let mut schema = json!({
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "status": {
+                    "anyOf": [
+                        {"type": "string", "enum": ["pending", "in_progress", "completed"]},
+                        {"type": "string", "const": "deleted"}
+                    ]
+                },
+                "metadata": {
+                    "type": "object",
+                    "propertyNames": {"type": "string"},
+                    "additionalProperties": {}
+                },
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "additionalProperties": {}
+                    }
+                }
+            },
+            "additionalProperties": {}
+        });
+
+        clean_schema(&mut schema);
+
+        assert!(schema.get("$schema").is_none());
+        assert_eq!(schema["additionalProperties"], true);
+        assert_eq!(
+            schema["properties"]["status"]["enum"],
+            json!(["pending", "in_progress", "completed", "deleted"])
+        );
+        assert!(schema["properties"]["status"].get("anyOf").is_none());
+        assert!(schema["properties"]["metadata"]
+            .get("propertyNames")
+            .is_none());
+        assert_eq!(
+            schema["properties"]["metadata"]["additionalProperties"],
+            true
+        );
+        assert_eq!(
+            schema["properties"]["items"]["items"]["additionalProperties"],
+            true
+        );
     }
 
     // ── Outbound trait contract ───────────────────────────────────────

@@ -37,8 +37,8 @@ describe("components/ProviderChainView", () => {
       />
     );
     expect(screen.getByText("尝试 JSON 解析失败")).toBeInTheDocument();
-    expect(screen.getByText("起始：")).toBeInTheDocument();
-    expect(screen.getByText("最终：")).toBeInTheDocument();
+    expect(screen.getByText("起始供应商：")).toBeInTheDocument();
+    expect(screen.getByText("最终供应商：")).toBeInTheDocument();
 
     rerender(
       <ProviderChainView
@@ -93,11 +93,10 @@ describe("components/ProviderChainView", () => {
     );
     expect(screen.getByText("数据源：request_logs.attempts_json（结构化）")).toBeInTheDocument();
     expect(screen.getAllByText("未知（id=99）").length).toBeGreaterThan(0);
-    expect(screen.getByText("供应商 #1")).toBeInTheDocument();
-    expect(screen.getByText("retry #2")).toBeInTheDocument();
+    expect(screen.getByText(/请求失败：未知（id=99）/)).toBeInTheDocument();
+    expect(screen.getByText(/未知 返回 HTTP 400/)).toBeInTheDocument();
+    expect(screen.getByText("跳过该供应商")).toBeInTheDocument();
     expect(screen.getByText("E")).toBeInTheDocument();
-    expect(screen.getByText("skip")).toBeInTheDocument();
-    expect(screen.getByText("because")).toBeInTheDocument();
-    expect(screen.getAllByText("失败").length).toBeGreaterThan(0);
+    expect(screen.getAllByText("未成功").length).toBeGreaterThan(0);
   });
 });

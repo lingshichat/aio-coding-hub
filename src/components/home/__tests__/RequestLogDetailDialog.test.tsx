@@ -1,14 +1,7 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
-import { toast } from "sonner";
-import { copyText } from "../../../services/clipboard";
-import { logToConsole } from "../../../services/consoleLog";
 import type { RequestLogDetail } from "../../../services/requestLogs";
 import { RequestLogDetailDialog } from "../RequestLogDetailDialog";
-
-vi.mock("sonner", () => ({ toast: vi.fn() }));
-vi.mock("../../../services/clipboard", () => ({ copyText: vi.fn() }));
-vi.mock("../../../services/consoleLog", () => ({ logToConsole: vi.fn() }));
 
 function createSelectedLog(overrides: Partial<RequestLogDetail> = {}): RequestLogDetail {
   return {
@@ -69,15 +62,11 @@ describe("home/RequestLogDetailDialog", () => {
     });
   });
 
-  it("renders detail view and handles clipboard copy success + failure for trace_id and usage_json", async () => {
-    const onSelectLogId = vi.fn();
-
-    vi.mocked(copyText).mockResolvedValue(undefined);
-
+  it("renders metrics first and hides raw trace/query details", () => {
     render(
       <RequestLogDetailDialog
         selectedLogId={1}
-        onSelectLogId={onSelectLogId}
+        onSelectLogId={vi.fn()}
         selectedLog={createSelectedLog()}
         selectedLogLoading={false}
         attemptLogs={[]}
@@ -85,43 +74,23 @@ describe("home/RequestLogDetailDialog", () => {
       />
     );
 
-    expect(screen.getByText("/v1/messages")).toBeInTheDocument();
-    expect(screen.getByText("GW_STREAM_ABORTED")).toBeInTheDocument();
-    expect(screen.getByText(/成本 \$0.12/)).toBeInTheDocument();
-    expect(screen.getByText("Provider Claude Bridge")).toBeInTheDocument();
-    expect(screen.getByText("source: OpenAI Primary")).toBeInTheDocument();
+    expect(screen.getByText("日志详情")).toBeInTheDocument();
+    expect(screen.getByText("关键指标")).toBeInTheDocument();
+    expect(screen.getByText("输入 Token")).toBeInTheDocument();
+    expect(screen.getByText("输出 Token")).toBeInTheDocument();
+    expect(screen.getByText("缓存创建")).toBeInTheDocument();
+    expect(screen.getByText("缓存读取")).toBeInTheDocument();
+    expect(screen.getByText("总耗时")).toBeInTheDocument();
+    expect(screen.getByText("TTFB")).toBeInTheDocument();
+    expect(screen.getByText("速率")).toBeInTheDocument();
+    expect(screen.getByText("花费")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "复制 trace_id" }));
-    await waitFor(() => {
-      expect(copyText).toHaveBeenCalledWith("trace-1");
-    });
-    expect(toast).toHaveBeenCalledWith("已复制 trace_id");
-
-    fireEvent.click(screen.getByRole("button", { name: "复制 usage_json" }));
-    await waitFor(() => {
-      expect(copyText).toHaveBeenCalledWith(
-        expect.stringContaining("cache_creation_1h_input_tokens")
-      );
-    });
-    expect(toast).toHaveBeenCalledWith("已复制 usage_json");
-
-    // pretty-printed JSON should now include cache_creation_1h_input_tokens
-    expect(screen.getByText(/\"input_tokens\"/)).toBeInTheDocument();
-    expect(screen.getAllByText(/cache_creation_1h_input_tokens/).length).toBeGreaterThan(0);
-
-    vi.mocked(copyText).mockRejectedValueOnce(new Error("nope"));
-    fireEvent.click(screen.getByRole("button", { name: "复制 trace_id" }));
-    await waitFor(() => {
-      expect(logToConsole).toHaveBeenCalledWith("error", "复制 trace_id 失败", {
-        error: "Error: nope",
-      });
-    });
-    expect(toast).toHaveBeenCalledWith("复制失败：当前环境不支持剪贴板");
+    expect(screen.queryByText(/请求追踪 ID/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/查询参数/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/usage_json/)).not.toBeInTheDocument();
   });
 
-  it("falls back to raw usage_json when JSON parsing fails", () => {
-    vi.mocked(copyText).mockResolvedValue(undefined);
-
+  it("falls back to raw usage_json when JSON parsing fails without rendering raw json section", () => {
     render(
       <RequestLogDetailDialog
         selectedLogId={1}
@@ -133,6 +102,7 @@ describe("home/RequestLogDetailDialog", () => {
       />
     );
 
-    expect(screen.getByText("not-json")).toBeInTheDocument();
+    expect(screen.queryByText("not-json")).not.toBeInTheDocument();
+    expect(screen.getByText("关键指标")).toBeInTheDocument();
   });
 });

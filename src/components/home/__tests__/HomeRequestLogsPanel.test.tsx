@@ -259,9 +259,10 @@ describe("components/home/HomeRequestLogsPanel", () => {
 
     // spot-check some conditional text rendering paths
     expect(screen.getAllByText("未知").length).toBeGreaterThan(0);
-    expect(screen.getByText("链路[降级*2]")).toBeInTheDocument();
+    expect(screen.getByText("切换 2 次")).toBeInTheDocument();
     expect(screen.getByText("会话复用")).toBeInTheDocument();
     expect(screen.getByText("x1.50")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /500 已中断/ })).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "日志" }));
     expect(screen.getByText("LOGS_PAGE")).toBeInTheDocument();
@@ -395,8 +396,8 @@ describe("components/home/HomeRequestLogsPanel", () => {
     );
 
     fireEvent.click(screen.getByRole("switch", { name: "最近使用记录简洁模式" }));
-    expect(screen.getByText("链路")).toBeInTheDocument();
-    expect(screen.queryByText(/链路\[降级\*/)).not.toBeInTheDocument();
+    expect(screen.getByText("直连完成")).toBeInTheDocument();
+    expect(screen.queryByText(/切换 \d+ 次/)).not.toBeInTheDocument();
   });
 
   it("renders loading/refreshing empty state variants", () => {
@@ -521,11 +522,11 @@ describe("components/home/HomeRequestLogsPanel", () => {
 
     fireEvent.click(screen.getByRole("switch", { name: "最近使用记录简洁模式" }));
 
-    // 标签文本应包含降级计数
-    expect(screen.getByText("链路[降级*4]")).toBeInTheDocument();
+    // 标签文本应包含切换摘要
+    expect(screen.getByText("切换 4 次")).toBeInTheDocument();
 
     // 鼠标悬停触发 tooltip 显示富文本内容
-    const routeLabel = screen.getByText("链路[降级*4]");
+    const routeLabel = screen.getByText("切换 4 次");
     await user.hover(routeLabel);
 
     // tooltip 路径概览中应显示 provider 名称
@@ -534,7 +535,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
     // ProvB 同时出现在卡片 provider 区域和 tooltip 中
     await waitFor(() => expect(screen.getAllByText("ProvB").length).toBeGreaterThanOrEqual(2));
     // 失败3次的标签
-    await waitFor(() => expect(screen.getAllByText("失败3次").length).toBeGreaterThan(0));
+    await waitFor(() => expect(screen.getAllByText("失败 3 次").length).toBeGreaterThan(0));
     // 成功的标签
     await waitFor(() => expect(screen.getAllByText("成功").length).toBeGreaterThan(0));
   });

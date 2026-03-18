@@ -36,6 +36,8 @@ const CLIENT_ABORT_ERROR_CODES: ReadonlySet<string> = new Set([
   GatewayErrorCodes.REQUEST_ABORTED,
 ]);
 
+const STATUS_TEXT_UNKNOWN = "状态未知";
+
 const SESSION_REUSE_TOOLTIP =
   "同一 session_id 在 5 分钟 TTL 内优先复用上一次成功 provider，减少抖动/提升缓存命中";
 
@@ -67,6 +69,7 @@ export function FreeBadge() {
 
 export type StatusBadge = {
   text: string;
+  semanticText: string;
   tone: string;
   title?: string;
   isError: boolean;
@@ -83,6 +86,7 @@ export function computeStatusBadge(input: {
   if (input.inProgress) {
     return {
       text: "进行中",
+      semanticText: "请求进行中",
       tone: "bg-accent/10 text-accent",
       isError: false,
       isClientAbort: false,
@@ -91,13 +95,30 @@ export function computeStatusBadge(input: {
   }
 
   const isClientAbort = !!(input.errorCode && CLIENT_ABORT_ERROR_CODES.has(input.errorCode));
-  const isError = input.status != null ? input.status >= 400 : input.errorCode != null;
   const hasFailover = !!input.hasFailover;
+  const isSuccessStatus = input.status != null && input.status >= 200 && input.status < 400;
+  const isError = input.status != null ? input.status >= 400 : input.errorCode != null;
 
-  const text = input.status == null ? "—" : String(input.status);
+  let text = STATUS_TEXT_UNKNOWN;
+  let semanticText = STATUS_TEXT_UNKNOWN;
+
+  if (isClientAbort) {
+    text = input.status == null ? "已中断" : `${input.status} 已中断`;
+    semanticText = "客户端已中断";
+  } else if (isSuccessStatus && hasFailover) {
+    text = input.status == null ? "切换后成功" : `${input.status} 切换后成功`;
+    semanticText = "切换供应商后成功";
+  } else if (isSuccessStatus) {
+    text = input.status == null ? "成功" : `${input.status} 成功`;
+    semanticText = "请求成功";
+  } else if (isError) {
+    text = input.status == null ? "失败" : `${input.status} 失败`;
+    semanticText = "请求失败";
+  }
+
   const tone = isClientAbort
     ? "bg-amber-50 text-amber-600 border border-amber-200/60 dark:bg-amber-900/30 dark:text-amber-400 dark:border-amber-700/60"
-    : input.status != null && input.status >= 200 && input.status < 400
+    : isSuccessStatus
       ? hasFailover
         ? "text-emerald-600 bg-emerald-50/50 border border-amber-300/60 dark:text-emerald-400 dark:bg-emerald-900/30 dark:border-amber-600/60"
         : "text-emerald-600 bg-emerald-50/50 dark:text-emerald-400 dark:bg-emerald-900/30"
@@ -106,10 +127,10 @@ export function computeStatusBadge(input: {
         : "text-slate-500 bg-slate-100 dark:text-slate-400 dark:bg-slate-700";
 
   const title = input.errorCode
-    ? `${getErrorCodeLabel(input.errorCode)} (${input.errorCode})`
-    : undefined;
+    ? `${semanticText} · ${getErrorCodeLabel(input.errorCode)} (${input.errorCode})`
+    : semanticText;
 
-  return { text, tone, title, isError, isClientAbort, hasFailover };
+  return { text, semanticText, tone, title, isError, isClientAbort, hasFailover };
 }
 
 export function computeEffectiveInputTokens(
@@ -134,10 +155,25 @@ export function buildRequestRouteMeta(input: {
     return {
       hasRoute: false,
       label: "链路",
+      summary: "暂无链路信息",
       tooltipText: null as string | null,
       tooltipContent: null as React.ReactNode,
     };
   }
+
+  const totalHopAttempts = hops.reduce((sum, h) => sum + (h.attempts ?? 1), 0);
+  const skippedCount = Math.max(0, input.attemptCount - totalHopAttempts);
+  const hasRetry = hops.some((h) => (h.attempts ?? 1) > 1);
+
+  const summary = input.hasFailover
+    ? `切换 ${input.attemptCount} 次后${input.status != null && input.status < 400 ? "成功" : "结束"}`
+    : skippedCount > 0 && hasRetry
+      ? `跳过 ${skippedCount} 个候选，并重试 ${input.attemptCount} 次`
+      : skippedCount > 0
+        ? `跳过 ${skippedCount} 个候选`
+        : hasRetry
+          ? `同一供应商重试 ${input.attemptCount} 次`
+          : "直连完成";
 
   // 纯文本 fallback（用于 title 属性）
   const tooltipText = hops
@@ -146,39 +182,40 @@ export function buildRequestRouteMeta(input: {
       const providerName =
         !rawProviderName || rawProviderName === "Unknown" ? "未知" : rawProviderName;
       const status = hop.status ?? (idx === hops.length - 1 ? input.status : null) ?? null;
-      const statusText = status == null ? "—" : String(status);
-      const attemptsSuffix = hop.attempts && hop.attempts > 1 ? ` x${hop.attempts}` : "";
-      if (hop.ok) return `${providerName}(${statusText})${attemptsSuffix}`;
+      const statusText = status == null ? "状态未知" : String(status);
+      const attemptsSuffix = hop.attempts && hop.attempts > 1 ? `，尝试 ${hop.attempts} 次` : "";
+      if (hop.ok) return `${providerName}（${statusText}，成功${attemptsSuffix}）`;
+      if (hop.skipped) return `${providerName}（已跳过${attemptsSuffix}）`;
       const errorCode = hop.error_code ?? null;
       const errorLabel = errorCode ? getErrorCodeLabel(errorCode) : "失败";
-      return `${providerName}(${statusText} ${errorLabel})${attemptsSuffix}`;
+      return `${providerName}（${statusText}，${errorLabel}${attemptsSuffix}）`;
     })
-    .join(" -> ");
+    .join(" → ");
 
-  // 标签: 区分"降级"（切换 provider）、"重试"（同一 provider 多次尝试）、"跳过"（有 provider 被 skip）
-  // skipped 的 provider 不在 hops 中，通过 attemptCount 与 hop attempts 差值推算
-  const totalHopAttempts = hops.reduce((sum, h) => sum + (h.attempts ?? 1), 0);
-  const skippedCount = input.attemptCount - totalHopAttempts;
-  const hasRetry = hops.some((h) => (h.attempts ?? 1) > 1);
-
-  let label = "链路";
+  let label = summary;
   if (input.hasFailover) {
-    // 真正切换了 provider（route 中有多个 hop）
-    label = `链路[降级*${input.attemptCount}]`;
+    label = `切换 ${input.attemptCount} 次`;
   } else if (skippedCount > 0 && hasRetry) {
-    label = `链路[跳过*${skippedCount}+重试]`;
+    label = `跳过 ${skippedCount} 个 + 重试`;
   } else if (skippedCount > 0) {
-    label = `链路[跳过*${skippedCount}]`;
+    label = `跳过 ${skippedCount} 个`;
   } else if (hasRetry) {
-    label = `链路[重试*${input.attemptCount}]`;
+    label = `重试 ${input.attemptCount} 次`;
   }
 
-  // 富文本 tooltip 内容
-  const tooltipContent = <RouteTooltipContent hops={hops} finalStatus={input.status} />;
+  const tooltipContent = (
+    <RouteTooltipContent
+      hops={hops}
+      finalStatus={input.status}
+      summary={summary}
+      skippedCount={skippedCount}
+    />
+  );
 
   return {
     hasRoute: true,
     label,
+    summary,
     tooltipText,
     tooltipContent,
   };

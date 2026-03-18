@@ -533,12 +533,7 @@ pub(crate) fn claude_terminal_launch_context(
     db: &db::Db,
     provider_id: i64,
 ) -> crate::shared::error::AppResult<ClaudeTerminalLaunchContext> {
-    if provider_id <= 0 {
-        return Err(format!("SEC_INVALID_INPUT: invalid provider_id={provider_id}").into());
-    }
-
-    let conn = db.open_connection()?;
-    let row: Option<(
+    type ClaudeLaunchProviderRow = (
         String,
         String,
         String,
@@ -546,7 +541,14 @@ pub(crate) fn claude_terminal_launch_context(
         String,
         Option<String>,
         Option<i64>,
-    )> = conn
+    );
+
+    if provider_id <= 0 {
+        return Err(format!("SEC_INVALID_INPUT: invalid provider_id={provider_id}").into());
+    }
+
+    let conn = db.open_connection()?;
+    let row: Option<ClaudeLaunchProviderRow> = conn
         .query_row(
             r#"
 SELECT

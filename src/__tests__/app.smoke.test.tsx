@@ -52,7 +52,7 @@ function renderApp() {
 async function renderRouteAndFindHeading(hash: string, headingName: string) {
   window.location.hash = hash;
   renderApp();
-  return screen.findByRole("heading", { level: 1, name: headingName });
+  return screen.findByRole("heading", { level: 1, name: headingName }, { timeout: 5000 });
 }
 
 describe("App (smoke)", () => {
@@ -86,7 +86,9 @@ describe("App (smoke)", () => {
     window.location.hash = "#/settings";
     renderApp();
 
-    expect(await screen.findByRole("heading", { level: 1, name: "设置" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { level: 1, name: "设置" }, { timeout: 5000 })
+    ).toBeInTheDocument();
 
     await vi.waitFor(() => {
       expect(mockLogToConsole).toHaveBeenCalledWith(

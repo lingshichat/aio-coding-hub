@@ -41,6 +41,18 @@ vi.mock("../../services/settingsCodexSessionIdCompletion", async () => {
 });
 
 describe("query/settings", () => {
+  it("useSettingsQuery respects enabled=false", () => {
+    setTauriRuntime();
+    vi.mocked(settingsGet).mockClear();
+
+    const client = createTestQueryClient();
+    const wrapper = createQueryWrapper(client);
+
+    renderHook(() => useSettingsQuery({ enabled: false }), { wrapper });
+
+    expect(settingsGet).not.toHaveBeenCalled();
+  });
+
   it("calls settingsGet with tauri runtime", async () => {
     setTauriRuntime();
     vi.mocked(settingsGet).mockResolvedValue(createTestAppSettings());
@@ -103,6 +115,41 @@ describe("query/settings", () => {
     expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: settingsKeys.get() });
   });
 
+  it("useSettingsSetMutation keeps cache when service returns null", async () => {
+    setTauriRuntime();
+
+    const initial = createTestAppSettings();
+    vi.mocked(settingsSet).mockResolvedValue(null as any);
+
+    const client = createTestQueryClient();
+    client.setQueryData(settingsKeys.get(), initial);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useSettingsSetMutation(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({
+        preferredPort: 40000,
+        autoStart: false,
+        trayEnabled: true,
+        logRetentionDays: 30,
+        providerCooldownSeconds: 30,
+        providerBaseUrlPingCacheTtlSeconds: 60,
+        upstreamFirstByteTimeoutSeconds: 0,
+        upstreamStreamIdleTimeoutSeconds: 0,
+        upstreamRequestTimeoutNonStreamingSeconds: 0,
+        enableCacheAnomalyMonitor: false,
+        failoverMaxAttemptsPerProvider: 5,
+        failoverMaxProvidersToTry: 5,
+        circuitBreakerFailureThreshold: 5,
+        circuitBreakerOpenDurationMinutes: 30,
+      });
+    });
+
+    expect(client.getQueryData(settingsKeys.get())).toEqual(initial);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: settingsKeys.get() });
+  });
+
   it("useSettingsGatewayRectifierSetMutation updates cache", async () => {
     setTauriRuntime();
 
@@ -119,6 +166,26 @@ describe("query/settings", () => {
     });
 
     expect(client.getQueryData(settingsKeys.get())).toEqual(updated);
+  });
+
+  it("useSettingsGatewayRectifierSetMutation keeps cache when service returns null", async () => {
+    setTauriRuntime();
+
+    const initial = createTestAppSettings();
+    vi.mocked(settingsGatewayRectifierSet).mockResolvedValue(null as any);
+
+    const client = createTestQueryClient();
+    client.setQueryData(settingsKeys.get(), initial);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useSettingsGatewayRectifierSetMutation(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ enable_response_fixer: false } as any);
+    });
+
+    expect(client.getQueryData(settingsKeys.get())).toEqual(initial);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: settingsKeys.get() });
   });
 
   it("useSettingsCircuitBreakerNoticeSetMutation updates cache", async () => {
@@ -139,6 +206,26 @@ describe("query/settings", () => {
     expect(client.getQueryData(settingsKeys.get())).toEqual(updated);
   });
 
+  it("useSettingsCircuitBreakerNoticeSetMutation keeps cache when service returns null", async () => {
+    setTauriRuntime();
+
+    const initial = createTestAppSettings();
+    vi.mocked(settingsCircuitBreakerNoticeSet).mockResolvedValue(null as any);
+
+    const client = createTestQueryClient();
+    client.setQueryData(settingsKeys.get(), initial);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useSettingsCircuitBreakerNoticeSetMutation(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync(true);
+    });
+
+    expect(client.getQueryData(settingsKeys.get())).toEqual(initial);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: settingsKeys.get() });
+  });
+
   it("useSettingsCodexSessionIdCompletionSetMutation updates cache", async () => {
     setTauriRuntime();
 
@@ -157,5 +244,27 @@ describe("query/settings", () => {
     });
 
     expect(client.getQueryData(settingsKeys.get())).toEqual(updated);
+  });
+
+  it("useSettingsCodexSessionIdCompletionSetMutation keeps cache when service returns null", async () => {
+    setTauriRuntime();
+
+    const initial = createTestAppSettings();
+    vi.mocked(settingsCodexSessionIdCompletionSet).mockResolvedValue(null as any);
+
+    const client = createTestQueryClient();
+    client.setQueryData(settingsKeys.get(), initial);
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useSettingsCodexSessionIdCompletionSetMutation(), {
+      wrapper,
+    });
+    await act(async () => {
+      await result.current.mutateAsync(false);
+    });
+
+    expect(client.getQueryData(settingsKeys.get())).toEqual(initial);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: settingsKeys.get() });
   });
 });

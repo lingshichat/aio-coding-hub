@@ -84,4 +84,15 @@ describe("ui/Tooltip", () => {
       expect(screen.getByRole("tooltip").closest(".tip-style")).toBeInTheDocument()
     );
   });
+
+  it("wraps plain text children so the tooltip can still open", async () => {
+    const user = userEvent.setup();
+    render(<Tooltip content="Plain tip">Plain anchor</Tooltip>);
+
+    const anchor = screen.getByText("Plain anchor");
+    expect(anchor).toHaveClass("inline-flex");
+
+    await user.hover(anchor);
+    expect(await screen.findByRole("tooltip")).toHaveTextContent("Plain tip");
+  });
 });

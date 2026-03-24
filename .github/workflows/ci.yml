@@ -93,7 +93,11 @@ jobs:
         working-directory: src-tauri
         run: cargo update --workspace
 
+      # release-please PRs have a dedicated workflow that commits Cargo.lock
+      # after version bumps. Skip the committed-file check here to avoid a
+      # race where CI runs before that sync workflow pushes its follow-up commit.
       - name: Verify Cargo.lock is committed
+        if: ${{ github.event_name != 'pull_request' || !startsWith(github.head_ref, 'release-please--') }}
         shell: bash
         run: |
           set -euo pipefail

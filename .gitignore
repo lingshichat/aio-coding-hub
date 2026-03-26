@@ -40,5 +40,4 @@ coverage/
 .serena/
 src/templates/
 .codex/
-src-tauri/target/
-src-tauri/target-*/
+src-tauri/target*/

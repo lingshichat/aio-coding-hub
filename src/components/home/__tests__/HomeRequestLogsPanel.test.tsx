@@ -463,7 +463,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getAllByText(/Codex\s*\/\s*gpt-5.4/).length).toBeGreaterThan(0);
+    expect(screen.getAllByTitle("Codex / gpt-5.4").length).toBeGreaterThan(0);
     expect(screen.getAllByText("免费").length).toBeGreaterThan(0);
     expect(screen.getByText("进行中")).toBeInTheDocument();
     expect(screen.queryByText("当前没有最近使用记录")).not.toBeInTheDocument();
@@ -612,7 +612,7 @@ describe("components/home/HomeRequestLogsPanel", () => {
       </MemoryRouter>
     );
 
-    expect(screen.getByText(/Codex\s*\/\s*gpt-5.4/)).toBeInTheDocument();
+    expect(screen.getByTitle("Codex / gpt-5.4")).toBeInTheDocument();
     expect(screen.getAllByText("P1").length).toBeGreaterThan(0);
     expect(screen.getByText("流中断")).toBeInTheDocument();
     expect(screen.queryByText("3.20s")).not.toBeInTheDocument();

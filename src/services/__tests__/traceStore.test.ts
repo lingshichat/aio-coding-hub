@@ -139,6 +139,37 @@ describe("services/traceStore", () => {
     vi.useRealTimers();
   });
 
+  it("ingestTraceAttempt backfills requested_model when request_start is missing", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { ingestTraceAttempt, useTraceStore } = await importFreshTraceStore();
+    const { result } = renderHook(() => useTraceStore());
+
+    act(() => {
+      ingestTraceAttempt({
+        trace_id: "t-model-from-attempt",
+        cli_key: "claude",
+        method: "POST",
+        path: "/v1/messages",
+        query: null,
+        requested_model: "claude-opus-4-6",
+        attempt_index: 1,
+        provider_id: 2,
+        provider_name: "SSAiCode",
+        base_url: "https://provider.example",
+        outcome: "started",
+        status: null,
+        attempt_started_ms: 0,
+        attempt_duration_ms: 0,
+      });
+    });
+
+    expect(result.current.traces[0]?.requested_model).toBe("claude-opus-4-6");
+
+    vi.useRealTimers();
+  });
+
   it("ingestTraceRequest creates new trace when trace_id not found", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(5000);
@@ -215,6 +246,34 @@ describe("services/traceStore", () => {
     expect(result.current.traces[0]?.trace_id).toBe("existing-req");
     expect(result.current.traces[0]?.summary).toBeDefined();
     expect(result.current.traces[0]?.summary?.status).toBe(200);
+
+    vi.useRealTimers();
+  });
+
+  it("ingestTraceRequest backfills requested_model when summary arrives first", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(0);
+
+    const { ingestTraceRequest, useTraceStore } = await importFreshTraceStore();
+    const { result } = renderHook(() => useTraceStore());
+
+    act(() => {
+      ingestTraceRequest({
+        trace_id: "summary-first",
+        cli_key: "claude",
+        method: "POST",
+        path: "/v1/messages",
+        query: null,
+        requested_model: "claude-opus-4-6",
+        status: 200,
+        error_category: null,
+        error_code: null,
+        duration_ms: 50,
+        attempts: [],
+      });
+    });
+
+    expect(result.current.traces[0]?.requested_model).toBe("claude-opus-4-6");
 
     vi.useRealTimers();
   });

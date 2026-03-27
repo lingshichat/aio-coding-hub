@@ -62,6 +62,9 @@ describe("cli-manager/GeneralTab", () => {
         taskCompleteNotifyEnabled={true}
         taskCompleteNotifySaving={false}
         onPersistTaskCompleteNotify={vi.fn()}
+        notificationSoundEnabled={true}
+        notificationSoundSaving={false}
+        onPersistNotificationSound={vi.fn()}
         appSettings={null}
         commonSettingsSaving={false}
         onPersistCommonSettings={vi.fn()}
@@ -84,7 +87,6 @@ describe("cli-manager/GeneralTab", () => {
     );
 
     expect(screen.getAllByText("数据不可用").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("不可用").length).toBeGreaterThan(0);
   });
 
   it("wires switches, inputs and navigation actions when available", () => {
@@ -128,6 +130,9 @@ describe("cli-manager/GeneralTab", () => {
         taskCompleteNotifyEnabled={true}
         taskCompleteNotifySaving={false}
         onPersistTaskCompleteNotify={vi.fn()}
+        notificationSoundEnabled={true}
+        notificationSoundSaving={false}
+        onPersistNotificationSound={vi.fn()}
         appSettings={createTestAppSettings({
           wsl_target_cli: { claude: true, codex: false, gemini: false },
         })}

@@ -9,8 +9,16 @@ import {
 import { setTauriRuntime } from "../../test/utils/tauriRuntime";
 
 const logToConsoleMock = vi.hoisted(() => vi.fn());
+const getNotificationSoundEnabledMock = vi.hoisted(() => vi.fn());
+const playNotificationSoundMock = vi.hoisted(() => vi.fn());
+
 vi.mock("../consoleLog", () => ({
   logToConsole: logToConsoleMock,
+}));
+
+vi.mock("../notificationSound", () => ({
+  getNotificationSoundEnabled: getNotificationSoundEnabledMock,
+  playNotificationSound: playNotificationSoundMock,
 }));
 
 describe("services/noticeEvents", () => {
@@ -21,6 +29,7 @@ describe("services/noticeEvents", () => {
     vi.mocked(tauriListen).mockResolvedValue(tauriUnlisten);
     vi.mocked(tauriIsPermissionGranted).mockResolvedValue(true);
     vi.mocked(tauriSendNotification).mockResolvedValue(undefined);
+    getNotificationSoundEnabledMock.mockReturnValue(true);
 
     const { listenNoticeEvents } = await import("../noticeEvents");
     const unlisten = await listenNoticeEvents();
@@ -33,7 +42,12 @@ describe("services/noticeEvents", () => {
     expect(handler).toBeTypeOf("function");
 
     await handler?.({ payload: { level: "info", title: "T", body: "B" } } as any);
-    expect(tauriSendNotification).toHaveBeenCalledWith({ title: "T", body: "B" });
+    expect(playNotificationSoundMock).toHaveBeenCalledTimes(1);
+    expect(tauriSendNotification).toHaveBeenCalledWith({
+      title: "T",
+      body: "B",
+      silent: true,
+    });
 
     unlisten();
     expect(tauriUnlisten).toHaveBeenCalled();
@@ -46,6 +60,7 @@ describe("services/noticeEvents", () => {
     vi.mocked(tauriListen).mockResolvedValue(tauriUnlisten);
     vi.mocked(tauriIsPermissionGranted).mockResolvedValue(false);
     vi.mocked(tauriSendNotification).mockResolvedValue(undefined);
+    getNotificationSoundEnabledMock.mockReturnValue(true);
 
     const { listenNoticeEvents } = await import("../noticeEvents");
     await listenNoticeEvents();
@@ -55,6 +70,7 @@ describe("services/noticeEvents", () => {
       .mock.calls.find((c) => c[0] === appEventNames.notice)?.[1];
     await handler?.({ payload: { level: "info", title: "T", body: "B" } } as any);
 
+    expect(playNotificationSoundMock).not.toHaveBeenCalled();
     expect(tauriSendNotification).not.toHaveBeenCalled();
   });
 
@@ -65,6 +81,7 @@ describe("services/noticeEvents", () => {
     vi.mocked(tauriListen).mockResolvedValue(tauriUnlisten);
     vi.mocked(tauriIsPermissionGranted).mockResolvedValue(true);
     vi.mocked(tauriSendNotification).mockRejectedValue(new Error("notification failed"));
+    getNotificationSoundEnabledMock.mockReturnValue(true);
 
     const { listenNoticeEvents } = await import("../noticeEvents");
     await listenNoticeEvents();
@@ -85,5 +102,6 @@ describe("services/noticeEvents", () => {
         title: "T",
       })
     );
+    expect(playNotificationSoundMock).toHaveBeenCalledTimes(1);
   });
 });

@@ -142,7 +142,7 @@ describe("pages/settings/SettingsMainColumn", () => {
       requestPersist,
     });
 
-    const row = screen.getByText("显示首页热力图").parentElement;
+    const row = screen.getByText("显示首页热力图").parentElement?.parentElement;
     expect(row).toBeTruthy();
     fireEvent.click(within(row as HTMLElement).getByRole("switch"));
     expect(setShowHomeHeatmap).toHaveBeenCalledWith(false);
@@ -164,7 +164,7 @@ describe("pages/settings/SettingsMainColumn", () => {
       requestPersist,
     });
 
-    const row = screen.getByText("显示首页用量统计").parentElement;
+    const row = screen.getByText("显示首页用量统计").parentElement?.parentElement;
     expect(row).toBeTruthy();
     fireEvent.click(within(row as HTMLElement).getByRole("switch"));
     expect(setShowHomeUsage).toHaveBeenCalledWith(false);
@@ -316,20 +316,20 @@ describe("pages/settings/SettingsMainColumn", () => {
     expect(toast).toHaveBeenCalledWith("本地网关已重启");
 
     // Persist switches.
-    const autoRow = screen.getByText("开机自启").parentElement;
+    const autoRow = screen.getByText("开机自启").parentElement?.parentElement;
     expect(autoRow).toBeTruthy();
     fireEvent.click(within(autoRow as HTMLElement).getByRole("switch"));
     expect(setAutoStart).toHaveBeenCalledWith(true);
     expect(requestPersist).toHaveBeenCalledWith({ auto_start: true });
 
-    const trayRow = screen.getByText("托盘常驻").parentElement;
+    const trayRow = screen.getByText("托盘常驻").parentElement?.parentElement;
     expect(trayRow).toBeTruthy();
     fireEvent.click(within(trayRow as HTMLElement).getByRole("switch"));
     expect(setTrayEnabled).toHaveBeenCalledWith(false);
     expect(requestPersist).toHaveBeenCalledWith({ tray_enabled: false });
 
     // Commit number fields.
-    const portRow = screen.getByText("监听端口").parentElement;
+    const portRow = screen.getByText("监听端口").parentElement?.parentElement;
     expect(portRow).toBeTruthy();
     const portInput = within(portRow as HTMLElement).getByRole("spinbutton");
     fireEvent.change(portInput, { target: { value: "40000" } });

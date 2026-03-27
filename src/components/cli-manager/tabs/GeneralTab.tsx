@@ -11,7 +11,7 @@ import { SettingsRow } from "../../../ui/SettingsRow";
 import { Switch } from "../../../ui/Switch";
 import { NetworkSettingsCard } from "../NetworkSettingsCard";
 import { WslSettingsCard } from "../WslSettingsCard";
-import { AlertTriangle, Bell, Shield, TrendingDown } from "lucide-react";
+import { Bell, Shield, TrendingDown } from "lucide-react";
 
 export type CliManagerAvailability = "checking" | "available" | "unavailable";
 
@@ -36,6 +36,10 @@ export type CliManagerGeneralTabProps = {
   taskCompleteNotifyEnabled: boolean;
   taskCompleteNotifySaving: boolean;
   onPersistTaskCompleteNotify: (enable: boolean) => Promise<void> | void;
+
+  notificationSoundEnabled: boolean;
+  notificationSoundSaving: boolean;
+  onPersistNotificationSound: (enable: boolean) => Promise<void> | void;
 
   appSettings: AppSettings | null;
   commonSettingsSaving: boolean;
@@ -77,6 +81,9 @@ export function CliManagerGeneralTab({
   taskCompleteNotifyEnabled,
   taskCompleteNotifySaving,
   onPersistTaskCompleteNotify,
+  notificationSoundEnabled,
+  notificationSoundSaving,
+  onPersistNotificationSound,
   appSettings,
   commonSettingsSaving,
   onPersistCommonSettings,
@@ -100,29 +107,27 @@ export function CliManagerGeneralTab({
 
   return (
     <div className="space-y-6">
-      <div className="grid gap-6 md:grid-cols-2">
-        <Card className="md:col-span-2 relative overflow-hidden">
-          <div className="absolute top-0 right-0 p-4 opacity-5">
-            <Shield className="h-32 w-32" />
-          </div>
-          <div className="relative z-10">
-            <div className="mb-4 border-b border-slate-100 dark:border-slate-700 pb-4">
-              <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
-                <Shield className="h-5 w-5 text-blue-500" />
-                网关整流器
-              </h2>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                优化与 AI 服务的连接稳定性，自动修复常见响应问题。
-              </p>
-            </div>
+      <Card className="overflow-hidden">
+        <div className="border-b border-slate-100 dark:border-slate-700 p-6">
+          <h2 className="text-xl font-bold text-slate-900 dark:text-slate-100">通用配置</h2>
+          <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+            网关整流、通知、超时与熔断策略。
+          </p>
+        </div>
 
-            {rectifierAvailable === "unavailable" ? (
-              <div className="text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 p-4 rounded-lg">
-                数据不可用
-              </div>
-            ) : (
-              <div className="space-y-4">
-                <SettingsRow label="详细供应商错误信息">
+        {rectifierAvailable === "unavailable" ? (
+          <div className="text-sm text-slate-600 dark:text-slate-400 text-center py-8">
+            数据不可用
+          </div>
+        ) : (
+          <div className="p-6 space-y-6">
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2 mb-3">
+                <Shield className="h-4 w-4 text-slate-400 dark:text-slate-500" />
+                网关整流器
+              </h3>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                <SettingsRow label="详细供应商错误信息" subtitle="在日志中显示完整的上游错误详情。">
                   <Switch
                     checked={rectifier.verbose_provider_error}
                     onCheckedChange={(checked) =>
@@ -131,7 +136,10 @@ export function CliManagerGeneralTab({
                     disabled={rectifierSaving || rectifierAvailable !== "available"}
                   />
                 </SettingsRow>
-                <SettingsRow label="拦截 Anthropic Warmup 请求">
+                <SettingsRow
+                  label="拦截 Anthropic Warmup 请求"
+                  subtitle="自动拦截并响应 Anthropic 的预热请求，避免计费。"
+                >
                   <Switch
                     checked={rectifier.intercept_anthropic_warmup_requests}
                     onCheckedChange={(checked) =>
@@ -140,7 +148,10 @@ export function CliManagerGeneralTab({
                     disabled={rectifierSaving || rectifierAvailable !== "available"}
                   />
                 </SettingsRow>
-                <SettingsRow label="Thinking 签名整流器">
+                <SettingsRow
+                  label="Thinking 签名整流器"
+                  subtitle="自动修复 extended thinking 相关的签名问题。"
+                >
                   <Switch
                     checked={rectifier.enable_thinking_signature_rectifier}
                     onCheckedChange={(checked) =>
@@ -149,7 +160,10 @@ export function CliManagerGeneralTab({
                     disabled={rectifierSaving || rectifierAvailable !== "available"}
                   />
                 </SettingsRow>
-                <SettingsRow label="Thinking 预算整流器">
+                <SettingsRow
+                  label="Thinking 预算整流器"
+                  subtitle="自动修复 thinking budget 相关的参数问题。"
+                >
                   <Switch
                     checked={rectifier.enable_thinking_budget_rectifier}
                     onCheckedChange={(checked) =>
@@ -158,7 +172,10 @@ export function CliManagerGeneralTab({
                     disabled={rectifierSaving || rectifierAvailable !== "available"}
                   />
                 </SettingsRow>
-                <SettingsRow label="Claude metadata.user_id 注入">
+                <SettingsRow
+                  label="Claude metadata.user_id 注入"
+                  subtitle="为 Claude 请求自动注入 metadata.user_id 字段。"
+                >
                   <Switch
                     checked={rectifier.enable_claude_metadata_user_id_injection}
                     onCheckedChange={(checked) =>
@@ -169,116 +186,125 @@ export function CliManagerGeneralTab({
                     disabled={rectifierSaving || rectifierAvailable !== "available"}
                   />
                 </SettingsRow>
-                <div className="rounded-lg bg-slate-50 dark:bg-slate-800 p-4 border border-slate-100 dark:border-slate-700">
-                  <SettingsRow label="响应整流（FluxFix）">
-                    <Switch
-                      checked={rectifier.enable_response_fixer}
-                      onCheckedChange={(checked) =>
-                        void onPersistRectifier({ enable_response_fixer: checked })
-                      }
-                      disabled={rectifierSaving || rectifierAvailable !== "available"}
-                    />
-                  </SettingsRow>
-                  {rectifier.enable_response_fixer && (
-                    <div className="mt-2 space-y-2 pl-4 border-l-2 border-slate-200 dark:border-slate-600 ml-1">
-                      <SettingsRow label="修复编码问题">
-                        <Switch
-                          checked={rectifier.response_fixer_fix_encoding}
-                          onCheckedChange={(checked) =>
-                            void onPersistRectifier({ response_fixer_fix_encoding: checked })
-                          }
-                          disabled={rectifierSaving || rectifierAvailable !== "available"}
-                        />
-                      </SettingsRow>
-                      <SettingsRow label="修复 SSE 格式">
-                        <Switch
-                          checked={rectifier.response_fixer_fix_sse_format}
-                          onCheckedChange={(checked) =>
-                            void onPersistRectifier({ response_fixer_fix_sse_format: checked })
-                          }
-                          disabled={rectifierSaving || rectifierAvailable !== "available"}
-                        />
-                      </SettingsRow>
-                      <SettingsRow label="修复截断的 JSON">
-                        <Switch
-                          checked={rectifier.response_fixer_fix_truncated_json}
-                          onCheckedChange={(checked) =>
-                            void onPersistRectifier({ response_fixer_fix_truncated_json: checked })
-                          }
-                          disabled={rectifierSaving || rectifierAvailable !== "available"}
-                        />
-                      </SettingsRow>
-                    </div>
-                  )}
-                </div>
-
-                <div className="rounded-lg bg-slate-50 dark:bg-slate-800 p-4 border border-slate-100 dark:border-slate-700">
-                  <SettingsRow label="Codex Session ID 补全">
-                    <Switch
-                      checked={codexSessionIdCompletionEnabled}
-                      onCheckedChange={(checked) => void onPersistCodexSessionIdCompletion(checked)}
-                      disabled={
-                        codexSessionIdCompletionSaving || rectifierAvailable !== "available"
-                      }
-                    />
-                  </SettingsRow>
-                  <p className="mt-2 text-xs text-slate-500 dark:text-slate-400">
-                    当 Codex 请求仅提供 session_id / x-session-id（请求头）或
-                    prompt_cache_key（请求体）之一时，
-                    自动补全另一侧；若两者均缺失，则生成并在短时间内稳定复用的会话标识。
-                  </p>
-                </div>
+                <SettingsRow
+                  label="响应整流（FluxFix）"
+                  subtitle="自动修复编码、SSE 格式、截断 JSON 等常见响应问题。"
+                >
+                  <Switch
+                    checked={rectifier.enable_response_fixer}
+                    onCheckedChange={(checked) =>
+                      void onPersistRectifier({ enable_response_fixer: checked })
+                    }
+                    disabled={rectifierSaving || rectifierAvailable !== "available"}
+                  />
+                </SettingsRow>
+                {rectifier.enable_response_fixer && (
+                  <>
+                    <SettingsRow label="修复编码问题" className="pl-6">
+                      <Switch
+                        checked={rectifier.response_fixer_fix_encoding}
+                        onCheckedChange={(checked) =>
+                          void onPersistRectifier({ response_fixer_fix_encoding: checked })
+                        }
+                        disabled={rectifierSaving || rectifierAvailable !== "available"}
+                      />
+                    </SettingsRow>
+                    <SettingsRow label="修复 SSE 格式" className="pl-6">
+                      <Switch
+                        checked={rectifier.response_fixer_fix_sse_format}
+                        onCheckedChange={(checked) =>
+                          void onPersistRectifier({ response_fixer_fix_sse_format: checked })
+                        }
+                        disabled={rectifierSaving || rectifierAvailable !== "available"}
+                      />
+                    </SettingsRow>
+                    <SettingsRow label="修复截断的 JSON" className="pl-6">
+                      <Switch
+                        checked={rectifier.response_fixer_fix_truncated_json}
+                        onCheckedChange={(checked) =>
+                          void onPersistRectifier({ response_fixer_fix_truncated_json: checked })
+                        }
+                        disabled={rectifierSaving || rectifierAvailable !== "available"}
+                      />
+                    </SettingsRow>
+                  </>
+                )}
+                <SettingsRow
+                  label="Codex Session ID 补全"
+                  subtitle="当 Codex 请求仅提供 session_id 或 prompt_cache_key 之一时，自动补全另一侧；若两者均缺失，则生成并稳定复用会话标识。"
+                >
+                  <Switch
+                    checked={codexSessionIdCompletionEnabled}
+                    onCheckedChange={(checked) => void onPersistCodexSessionIdCompletion(checked)}
+                    disabled={codexSessionIdCompletionSaving || rectifierAvailable !== "available"}
+                  />
+                </SettingsRow>
               </div>
-            )}
-          </div>
-        </Card>
-
-        <Card className="md:col-span-2">
-          <div className="mb-4 flex items-start gap-4">
-            <div className="p-2 bg-amber-50 dark:bg-amber-900/30 rounded-lg text-amber-600 dark:text-amber-400">
-              <AlertTriangle className="h-6 w-6" />
             </div>
-            <div className="flex-1">
-              <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                熔断通知
+
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2 mb-1">
+                <Bell className="h-4 w-4 text-slate-400 dark:text-slate-500" />
+                通知
               </h3>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                当服务熔断触发或恢复时，主动发送系统通知。
-                <br />
-                <span className="text-xs text-amber-600/80 dark:text-amber-400/80">
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+                控制系统通知与音效提醒行为。
+                <span className="ml-1 text-amber-600/80 dark:text-amber-400/80">
                   * 需在系统设置中授予通知权限
                 </span>
               </p>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                <SettingsRow
+                  label="任务结束提醒"
+                  subtitle="当 AI CLI 工具（Claude/Gemini：30 秒；Codex：120 秒）请求结束后静默无新请求时，发送系统通知提醒。"
+                >
+                  <Switch
+                    checked={taskCompleteNotifyEnabled}
+                    onCheckedChange={(checked) => void onPersistTaskCompleteNotify(checked)}
+                    disabled={taskCompleteNotifySaving || rectifierAvailable !== "available"}
+                  />
+                </SettingsRow>
+                <SettingsRow label="熔断通知" subtitle="当服务熔断触发或恢复时，主动发送系统通知。">
+                  <Switch
+                    checked={circuitBreakerNoticeEnabled}
+                    onCheckedChange={(checked) => void onPersistCircuitBreakerNotice(checked)}
+                    disabled={circuitBreakerNoticeSaving || rectifierAvailable !== "available"}
+                  />
+                </SettingsRow>
+                <SettingsRow
+                  label="通知音效"
+                  subtitle="使用自定义提示音代替系统默认通知音效，避免重复响铃。"
+                >
+                  <Switch
+                    checked={notificationSoundEnabled}
+                    onCheckedChange={(checked) => void onPersistNotificationSound(checked)}
+                    disabled={notificationSoundSaving || rectifierAvailable !== "available"}
+                  />
+                </SettingsRow>
+              </div>
             </div>
-            <div className="pt-1">
-              {rectifierAvailable === "unavailable" ? (
-                <span className="text-xs text-slate-400">不可用</span>
-              ) : (
-                <Switch
-                  checked={circuitBreakerNoticeEnabled}
-                  onCheckedChange={(checked) => void onPersistCircuitBreakerNotice(checked)}
-                  disabled={circuitBreakerNoticeSaving || rectifierAvailable !== "available"}
-                />
-              )}
-            </div>
-          </div>
-        </Card>
 
-        <Card className="md:col-span-2">
-          <div className="mb-4 flex items-start gap-4">
-            <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-slate-600 dark:text-slate-400">
-              <TrendingDown className="h-6 w-6" />
-            </div>
-            <div className="flex-1">
-              <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2 mb-1">
+                <TrendingDown className="h-4 w-4 text-slate-400 dark:text-slate-500" />
                 缓存异常监测（实验）
               </h3>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
                 {CACHE_ANOMALY_MONITOR_GUIDE_COPY.overview}
               </p>
-              <div className="mt-2 space-y-1 text-xs text-slate-500 dark:text-slate-400">
-                <p>{CACHE_ANOMALY_MONITOR_GUIDE_COPY.trigger}</p>
-                <p>{CACHE_ANOMALY_MONITOR_GUIDE_COPY.metric}</p>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                <SettingsRow
+                  label="启用缓存异常监测"
+                  subtitle={`${CACHE_ANOMALY_MONITOR_GUIDE_COPY.trigger} ${CACHE_ANOMALY_MONITOR_GUIDE_COPY.metric}`}
+                >
+                  <Switch
+                    checked={cacheAnomalyMonitorEnabled}
+                    onCheckedChange={(checked) => void onPersistCacheAnomalyMonitor(checked)}
+                    disabled={cacheAnomalyMonitorSaving || rectifierAvailable !== "available"}
+                  />
+                </SettingsRow>
+              </div>
+              <div className="mt-3 space-y-1 text-xs text-slate-500 dark:text-slate-400">
                 <p>{CACHE_ANOMALY_MONITOR_GUIDE_COPY.coldStart}</p>
                 <p>{CACHE_ANOMALY_MONITOR_GUIDE_COPY.nonCachingModel}</p>
                 <p>{CACHE_ANOMALY_MONITOR_GUIDE_COPY.thresholds}</p>
@@ -293,354 +319,305 @@ export function CliManagerGeneralTab({
                 </Button>
               </div>
             </div>
-            <div className="pt-1">
-              {rectifierAvailable === "unavailable" ? (
-                <span className="text-xs text-slate-400">不可用</span>
-              ) : (
-                <Switch
-                  checked={cacheAnomalyMonitorEnabled}
-                  onCheckedChange={(checked) => void onPersistCacheAnomalyMonitor(checked)}
-                  disabled={cacheAnomalyMonitorSaving || rectifierAvailable !== "available"}
-                />
-              )}
-            </div>
-          </div>
-        </Card>
 
-        <Card className="md:col-span-2">
-          <div className="mb-4 flex items-start gap-4">
-            <div className="p-2 bg-blue-50 dark:bg-blue-900/30 rounded-lg text-blue-600 dark:text-blue-400">
-              <Bell className="h-6 w-6" />
-            </div>
-            <div className="flex-1">
-              <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                任务结束提醒
+            {appSettings ? (
+              <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+                <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2 mb-3">
+                  <Shield className="h-4 w-4 text-slate-400 dark:text-slate-500" />
+                  启动与恢复
+                </h3>
+                <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                  <SettingsRow
+                    label="启动时 CLI 代理自愈"
+                    subtitle="应用启动后仅修复异常退出导致的 CLI 代理残留状态，不会主动改写当前配置。建议保持开启。"
+                  >
+                    <Switch
+                      checked={appSettings.enable_cli_proxy_startup_recovery}
+                      onCheckedChange={(checked) =>
+                        void onPersistCommonSettings({
+                          enable_cli_proxy_startup_recovery: checked,
+                        })
+                      }
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                  </SettingsRow>
+                </div>
+              </div>
+            ) : null}
+
+            {appSettings ? (
+              <>
+                <NetworkSettingsCard
+                  available={rectifierAvailable === "available"}
+                  saving={commonSettingsSaving}
+                  settings={appSettings}
+                  onPersistSettings={onPersistCommonSettings}
+                />
+                <WslSettingsCard
+                  available={rectifierAvailable === "available"}
+                  saving={commonSettingsSaving}
+                  settings={appSettings}
+                />
+              </>
+            ) : null}
+
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2 mb-1">
+                <Shield className="h-4 w-4 text-slate-400 dark:text-slate-500" />
+                超时策略
               </h3>
-              <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                当 AI CLI 工具（Claude/Gemini：30 秒；Codex：120 秒）请求结束后静默无新请求时，
-                发送系统通知提醒你任务已完成。
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+                控制上游请求的超时行为。0 表示禁用（交由上游/网络自行超时）。
               </p>
-              <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-                <span className="text-xs text-amber-600/80 dark:text-amber-400/80">
-                  * 需在系统设置中授予通知权限
-                </span>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                <SettingsRow
+                  label="首字节超时（0=禁用）"
+                  subtitle="等待上游返回第一个字节的最大时间。"
+                >
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      value={upstreamFirstByteTimeoutSeconds}
+                      onChange={(e) => {
+                        const next = e.currentTarget.valueAsNumber;
+                        if (Number.isFinite(next)) setUpstreamFirstByteTimeoutSeconds(next);
+                      }}
+                      onBlur={(e) => {
+                        if (!appSettings) return;
+                        const next = e.currentTarget.valueAsNumber;
+                        if (!Number.isFinite(next) || next < 0 || next > 3600) {
+                          toast("上游首字节超时必须为 0-3600 秒");
+                          setUpstreamFirstByteTimeoutSeconds(
+                            appSettings.upstream_first_byte_timeout_seconds
+                          );
+                          return;
+                        }
+                        void onPersistCommonSettings({ upstream_first_byte_timeout_seconds: next });
+                      }}
+                      onKeyDown={blurOnEnter}
+                      style={{ width: "5rem" }}
+                      min={0}
+                      max={3600}
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                    <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
+                  </div>
+                </SettingsRow>
+
+                <SettingsRow
+                  label="流式空闲超时（0=禁用）"
+                  subtitle="流式响应中两次数据之间的最大静默时间。"
+                >
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      value={upstreamStreamIdleTimeoutSeconds}
+                      onChange={(e) => {
+                        const next = e.currentTarget.valueAsNumber;
+                        if (Number.isFinite(next)) setUpstreamStreamIdleTimeoutSeconds(next);
+                      }}
+                      onBlur={(e) => {
+                        if (!appSettings) return;
+                        const next = e.currentTarget.valueAsNumber;
+                        if (!Number.isFinite(next) || next < 0 || next > 3600) {
+                          toast("上游流式空闲超时必须为 0-3600 秒");
+                          setUpstreamStreamIdleTimeoutSeconds(
+                            appSettings.upstream_stream_idle_timeout_seconds
+                          );
+                          return;
+                        }
+                        void onPersistCommonSettings({
+                          upstream_stream_idle_timeout_seconds: next,
+                        });
+                      }}
+                      onKeyDown={blurOnEnter}
+                      style={{ width: "5rem" }}
+                      min={0}
+                      max={3600}
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                    <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
+                  </div>
+                </SettingsRow>
+
+                <SettingsRow label="非流式总超时（0=禁用）" subtitle="非流式请求的总超时时间。">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      value={upstreamRequestTimeoutNonStreamingSeconds}
+                      onChange={(e) => {
+                        const next = e.currentTarget.valueAsNumber;
+                        if (Number.isFinite(next))
+                          setUpstreamRequestTimeoutNonStreamingSeconds(next);
+                      }}
+                      onBlur={(e) => {
+                        if (!appSettings) return;
+                        const next = e.currentTarget.valueAsNumber;
+                        if (!Number.isFinite(next) || next < 0 || next > 86400) {
+                          toast("上游非流式总超时必须为 0-86400 秒");
+                          setUpstreamRequestTimeoutNonStreamingSeconds(
+                            appSettings.upstream_request_timeout_non_streaming_seconds
+                          );
+                          return;
+                        }
+                        void onPersistCommonSettings({
+                          upstream_request_timeout_non_streaming_seconds: next,
+                        });
+                      }}
+                      onKeyDown={blurOnEnter}
+                      style={{ width: "5rem" }}
+                      min={0}
+                      max={86400}
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                    <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
+                  </div>
+                </SettingsRow>
+              </div>
+            </div>
+
+            <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-5">
+              <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2 mb-1">
+                <Shield className="h-4 w-4 text-slate-400 dark:text-slate-500" />
+                熔断与重试
+              </h3>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-3">
+                控制 Provider 失败后的冷却、重试与熔断行为。修改后建议重启网关以完全生效。
               </p>
-            </div>
-            <div className="pt-1">
-              {rectifierAvailable === "unavailable" ? (
-                <span className="text-xs text-slate-400">不可用</span>
-              ) : (
-                <Switch
-                  checked={taskCompleteNotifyEnabled}
-                  onCheckedChange={(checked) => void onPersistTaskCompleteNotify(checked)}
-                  disabled={taskCompleteNotifySaving || rectifierAvailable !== "available"}
-                />
-              )}
-            </div>
-          </div>
-        </Card>
+              <div className="divide-y divide-slate-100 dark:divide-slate-700">
+                <SettingsRow label="Provider 冷却" subtitle="单个 Provider 失败后的短暂冷却时间。">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      value={providerCooldownSeconds}
+                      onChange={(e) => {
+                        const next = e.currentTarget.valueAsNumber;
+                        if (Number.isFinite(next)) setProviderCooldownSeconds(next);
+                      }}
+                      onBlur={(e) => {
+                        if (!appSettings) return;
+                        const next = e.currentTarget.valueAsNumber;
+                        if (!Number.isFinite(next) || next < 0 || next > 3600) {
+                          toast("短熔断冷却必须为 0-3600 秒");
+                          setProviderCooldownSeconds(appSettings.provider_cooldown_seconds);
+                          return;
+                        }
+                        void onPersistCommonSettings({ provider_cooldown_seconds: next });
+                      }}
+                      onKeyDown={blurOnEnter}
+                      style={{ width: "5rem" }}
+                      min={0}
+                      max={3600}
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                    <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
+                  </div>
+                </SettingsRow>
 
-        {appSettings ? (
-          <>
-            <Card className="md:col-span-2">
-              <div className="mb-4 flex items-start gap-4">
-                <div className="p-2 bg-slate-50 dark:bg-slate-800 rounded-lg text-slate-600 dark:text-slate-400">
-                  <Shield className="h-6 w-6" />
-                </div>
-                <div className="flex-1">
-                  <h3 className="text-base font-semibold text-slate-900 dark:text-slate-100">
-                    启动时 CLI 代理自愈
-                  </h3>
-                  <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                    应用启动后仅修复异常退出导致的 CLI 代理残留状态，不会主动改写当前配置。
-                  </p>
-                </div>
-                <div className="pt-1">
-                  <Switch
-                    checked={appSettings.enable_cli_proxy_startup_recovery}
-                    onCheckedChange={(checked) =>
-                      void onPersistCommonSettings({
-                        enable_cli_proxy_startup_recovery: checked,
-                      })
-                    }
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                </div>
+                <SettingsRow
+                  label="Ping 选择缓存 TTL"
+                  subtitle="Provider 可用性 ping 结果的缓存有效期。"
+                >
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      value={providerBaseUrlPingCacheTtlSeconds}
+                      onChange={(e) => {
+                        const next = e.currentTarget.valueAsNumber;
+                        if (Number.isFinite(next)) setProviderBaseUrlPingCacheTtlSeconds(next);
+                      }}
+                      onBlur={(e) => {
+                        if (!appSettings) return;
+                        const next = e.currentTarget.valueAsNumber;
+                        if (!Number.isFinite(next) || next < 1 || next > 3600) {
+                          toast("Ping 选择缓存 TTL 必须为 1-3600 秒");
+                          setProviderBaseUrlPingCacheTtlSeconds(
+                            appSettings.provider_base_url_ping_cache_ttl_seconds
+                          );
+                          return;
+                        }
+                        void onPersistCommonSettings({
+                          provider_base_url_ping_cache_ttl_seconds: next,
+                        });
+                      }}
+                      onKeyDown={blurOnEnter}
+                      style={{ width: "5rem" }}
+                      min={1}
+                      max={3600}
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                    <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
+                  </div>
+                </SettingsRow>
+
+                <SettingsRow label="熔断阈值" subtitle="连续失败达到此次数后触发熔断。">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      value={circuitBreakerFailureThreshold}
+                      onChange={(e) => {
+                        const next = e.currentTarget.valueAsNumber;
+                        if (Number.isFinite(next)) setCircuitBreakerFailureThreshold(next);
+                      }}
+                      onBlur={(e) => {
+                        if (!appSettings) return;
+                        const next = e.currentTarget.valueAsNumber;
+                        if (!Number.isFinite(next) || next < 1 || next > 50) {
+                          toast("熔断阈值必须为 1-50");
+                          setCircuitBreakerFailureThreshold(
+                            appSettings.circuit_breaker_failure_threshold
+                          );
+                          return;
+                        }
+                        void onPersistCommonSettings({ circuit_breaker_failure_threshold: next });
+                      }}
+                      onKeyDown={blurOnEnter}
+                      style={{ width: "5rem" }}
+                      min={1}
+                      max={50}
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                    <span className="w-8 text-sm text-slate-500 dark:text-slate-400">次</span>
+                  </div>
+                </SettingsRow>
+
+                <SettingsRow label="熔断时长" subtitle="触发熔断后暂停该 Provider 的持续时间。">
+                  <div className="flex items-center gap-2">
+                    <Input
+                      type="number"
+                      value={circuitBreakerOpenDurationMinutes}
+                      onChange={(e) => {
+                        const next = e.currentTarget.valueAsNumber;
+                        if (Number.isFinite(next)) setCircuitBreakerOpenDurationMinutes(next);
+                      }}
+                      onBlur={(e) => {
+                        if (!appSettings) return;
+                        const next = e.currentTarget.valueAsNumber;
+                        if (!Number.isFinite(next) || next < 1 || next > 1440) {
+                          toast("熔断时长必须为 1-1440 分钟");
+                          setCircuitBreakerOpenDurationMinutes(
+                            appSettings.circuit_breaker_open_duration_minutes
+                          );
+                          return;
+                        }
+                        void onPersistCommonSettings({
+                          circuit_breaker_open_duration_minutes: next,
+                        });
+                      }}
+                      onKeyDown={blurOnEnter}
+                      style={{ width: "5rem" }}
+                      min={1}
+                      max={1440}
+                      disabled={commonSettingsSaving || rectifierAvailable !== "available"}
+                    />
+                    <span className="w-8 text-sm text-slate-500 dark:text-slate-400">分钟</span>
+                  </div>
+                </SettingsRow>
               </div>
-              <div className="text-xs text-slate-500 dark:text-slate-400">
-                建议保持开启；若你需要完全手动维护 CLI 配置文件，可临时关闭该开关。
-              </div>
-            </Card>
-
-            <NetworkSettingsCard
-              available={rectifierAvailable === "available"}
-              saving={commonSettingsSaving}
-              settings={appSettings}
-              onPersistSettings={onPersistCommonSettings}
-            />
-            <WslSettingsCard
-              available={rectifierAvailable === "available"}
-              saving={commonSettingsSaving}
-              settings={appSettings}
-            />
-          </>
-        ) : null}
-
-        <Card className="md:col-span-2">
-          <div className="mb-4 border-b border-slate-100 dark:border-slate-700 pb-4">
-            <div className="font-semibold text-slate-900 dark:text-slate-100">超时策略</div>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              控制上游请求的超时行为。0 表示禁用（交由上游/网络自行超时）。
-            </p>
+            </div>
           </div>
-
-          {rectifierAvailable === "unavailable" ? (
-            <div className="text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 p-4 rounded-lg">
-              数据不可用
-            </div>
-          ) : (
-            <div className="space-y-1">
-              <SettingsRow label="首字节超时（0=禁用）">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={upstreamFirstByteTimeoutSeconds}
-                    onChange={(e) => {
-                      const next = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(next)) setUpstreamFirstByteTimeoutSeconds(next);
-                    }}
-                    onBlur={(e) => {
-                      if (!appSettings) return;
-                      const next = e.currentTarget.valueAsNumber;
-                      if (!Number.isFinite(next) || next < 0 || next > 3600) {
-                        toast("上游首字节超时必须为 0-3600 秒");
-                        setUpstreamFirstByteTimeoutSeconds(
-                          appSettings.upstream_first_byte_timeout_seconds
-                        );
-                        return;
-                      }
-                      void onPersistCommonSettings({ upstream_first_byte_timeout_seconds: next });
-                    }}
-                    onKeyDown={blurOnEnter}
-                    style={{ width: "5rem" }}
-                    min={0}
-                    max={3600}
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                  <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label="流式空闲超时（0=禁用）">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={upstreamStreamIdleTimeoutSeconds}
-                    onChange={(e) => {
-                      const next = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(next)) setUpstreamStreamIdleTimeoutSeconds(next);
-                    }}
-                    onBlur={(e) => {
-                      if (!appSettings) return;
-                      const next = e.currentTarget.valueAsNumber;
-                      if (!Number.isFinite(next) || next < 0 || next > 3600) {
-                        toast("上游流式空闲超时必须为 0-3600 秒");
-                        setUpstreamStreamIdleTimeoutSeconds(
-                          appSettings.upstream_stream_idle_timeout_seconds
-                        );
-                        return;
-                      }
-                      void onPersistCommonSettings({ upstream_stream_idle_timeout_seconds: next });
-                    }}
-                    onKeyDown={blurOnEnter}
-                    style={{ width: "5rem" }}
-                    min={0}
-                    max={3600}
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                  <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label="非流式总超时（0=禁用）">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={upstreamRequestTimeoutNonStreamingSeconds}
-                    onChange={(e) => {
-                      const next = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(next)) setUpstreamRequestTimeoutNonStreamingSeconds(next);
-                    }}
-                    onBlur={(e) => {
-                      if (!appSettings) return;
-                      const next = e.currentTarget.valueAsNumber;
-                      if (!Number.isFinite(next) || next < 0 || next > 86400) {
-                        toast("上游非流式总超时必须为 0-86400 秒");
-                        setUpstreamRequestTimeoutNonStreamingSeconds(
-                          appSettings.upstream_request_timeout_non_streaming_seconds
-                        );
-                        return;
-                      }
-                      void onPersistCommonSettings({
-                        upstream_request_timeout_non_streaming_seconds: next,
-                      });
-                    }}
-                    onKeyDown={blurOnEnter}
-                    style={{ width: "5rem" }}
-                    min={0}
-                    max={86400}
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                  <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
-                </div>
-              </SettingsRow>
-            </div>
-          )}
-        </Card>
-
-        <Card className="md:col-span-2">
-          <div className="mb-4 border-b border-slate-100 dark:border-slate-700 pb-4">
-            <div className="font-semibold text-slate-900 dark:text-slate-100">熔断与重试</div>
-            <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-              控制 Provider 失败后的冷却、重试与熔断行为。修改后建议重启网关以完全生效。
-            </p>
-          </div>
-
-          {rectifierAvailable === "unavailable" ? (
-            <div className="text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 p-4 rounded-lg">
-              数据不可用
-            </div>
-          ) : (
-            <div className="space-y-1">
-              <SettingsRow label="Provider 冷却">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={providerCooldownSeconds}
-                    onChange={(e) => {
-                      const next = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(next)) setProviderCooldownSeconds(next);
-                    }}
-                    onBlur={(e) => {
-                      if (!appSettings) return;
-                      const next = e.currentTarget.valueAsNumber;
-                      if (!Number.isFinite(next) || next < 0 || next > 3600) {
-                        toast("短熔断冷却必须为 0-3600 秒");
-                        setProviderCooldownSeconds(appSettings.provider_cooldown_seconds);
-                        return;
-                      }
-                      void onPersistCommonSettings({ provider_cooldown_seconds: next });
-                    }}
-                    onKeyDown={blurOnEnter}
-                    style={{ width: "5rem" }}
-                    min={0}
-                    max={3600}
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                  <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label="Ping 选择缓存 TTL">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={providerBaseUrlPingCacheTtlSeconds}
-                    onChange={(e) => {
-                      const next = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(next)) setProviderBaseUrlPingCacheTtlSeconds(next);
-                    }}
-                    onBlur={(e) => {
-                      if (!appSettings) return;
-                      const next = e.currentTarget.valueAsNumber;
-                      if (!Number.isFinite(next) || next < 1 || next > 3600) {
-                        toast("Ping 选择缓存 TTL 必须为 1-3600 秒");
-                        setProviderBaseUrlPingCacheTtlSeconds(
-                          appSettings.provider_base_url_ping_cache_ttl_seconds
-                        );
-                        return;
-                      }
-                      void onPersistCommonSettings({
-                        provider_base_url_ping_cache_ttl_seconds: next,
-                      });
-                    }}
-                    onKeyDown={blurOnEnter}
-                    style={{ width: "5rem" }}
-                    min={1}
-                    max={3600}
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                  <span className="w-8 text-sm text-slate-500 dark:text-slate-400">秒</span>
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label="熔断阈值">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={circuitBreakerFailureThreshold}
-                    onChange={(e) => {
-                      const next = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(next)) setCircuitBreakerFailureThreshold(next);
-                    }}
-                    onBlur={(e) => {
-                      if (!appSettings) return;
-                      const next = e.currentTarget.valueAsNumber;
-                      if (!Number.isFinite(next) || next < 1 || next > 50) {
-                        toast("熔断阈值必须为 1-50");
-                        setCircuitBreakerFailureThreshold(
-                          appSettings.circuit_breaker_failure_threshold
-                        );
-                        return;
-                      }
-                      void onPersistCommonSettings({ circuit_breaker_failure_threshold: next });
-                    }}
-                    onKeyDown={blurOnEnter}
-                    style={{ width: "5rem" }}
-                    min={1}
-                    max={50}
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                  <span className="w-8 text-sm text-slate-500 dark:text-slate-400">次</span>
-                </div>
-              </SettingsRow>
-
-              <SettingsRow label="熔断时长">
-                <div className="flex items-center gap-2">
-                  <Input
-                    type="number"
-                    value={circuitBreakerOpenDurationMinutes}
-                    onChange={(e) => {
-                      const next = e.currentTarget.valueAsNumber;
-                      if (Number.isFinite(next)) setCircuitBreakerOpenDurationMinutes(next);
-                    }}
-                    onBlur={(e) => {
-                      if (!appSettings) return;
-                      const next = e.currentTarget.valueAsNumber;
-                      if (!Number.isFinite(next) || next < 1 || next > 1440) {
-                        toast("熔断时长必须为 1-1440 分钟");
-                        setCircuitBreakerOpenDurationMinutes(
-                          appSettings.circuit_breaker_open_duration_minutes
-                        );
-                        return;
-                      }
-                      void onPersistCommonSettings({
-                        circuit_breaker_open_duration_minutes: next,
-                      });
-                    }}
-                    onKeyDown={blurOnEnter}
-                    style={{ width: "5rem" }}
-                    min={1}
-                    max={1440}
-                    disabled={commonSettingsSaving || rectifierAvailable !== "available"}
-                  />
-                  <span className="w-8 text-sm text-slate-500 dark:text-slate-400">分钟</span>
-                </div>
-              </SettingsRow>
-            </div>
-          )}
-        </Card>
-      </div>
+        )}
+      </Card>
     </div>
   );
 }

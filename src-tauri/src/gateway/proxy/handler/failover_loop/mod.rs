@@ -933,6 +933,7 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
                     method: input.method_hint.clone(),
                     path: input.forwarded_path.clone(),
                     query: input.query.clone(),
+                    requested_model: input.requested_model.clone(),
                     attempt_index,
                     provider_id,
                     session_reuse,

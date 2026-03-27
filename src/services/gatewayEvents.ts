@@ -20,6 +20,7 @@ export type GatewayRequestEvent = {
   method: string;
   path: string;
   query: string | null;
+  requested_model?: string | null;
   status: number | null;
   error_category: string | null;
   error_code: string | null;
@@ -51,6 +52,7 @@ export type GatewayAttemptEvent = {
   method: string;
   path: string;
   query: string | null;
+  requested_model?: string | null;
   attempt_index: number;
   provider_id: number;
   session_reuse?: boolean | null;

@@ -21,7 +21,7 @@ const DEFAULT_CLI_PROXY_STATUS: CliProxyStatus[] = [
 
 // Default settings matching the Rust backend defaults.
 const DEFAULT_SETTINGS: AppSettings = {
-  schema_version: 24,
+  schema_version: 25,
   preferred_port: 37123,
   show_home_heatmap: true,
   show_home_usage: true,
@@ -58,6 +58,7 @@ const DEFAULT_SETTINGS: AppSettings = {
   enable_claude_metadata_user_id_injection: true,
   enable_cache_anomaly_monitor: false,
   enable_task_complete_notify: true,
+  enable_notification_sound: true,
   enable_response_fixer: true,
   response_fixer_fix_encoding: true,
   response_fixer_fix_sse_format: true,

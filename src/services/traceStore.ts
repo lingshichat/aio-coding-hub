@@ -174,20 +174,24 @@ export function ingestTraceAttempt(payload: GatewayAttemptEvent) {
       method: payload.method,
       path: payload.path,
       query: payload.query ?? null,
-      requested_model: null,
+      requested_model: payload.requested_model ?? null,
       first_seen_ms: now,
       last_seen_ms: now,
       attempts: [payload],
     }),
-    (existing, now) => ({
-      ...existing,
-      cli_key: payload.cli_key,
-      method: payload.method,
-      path: payload.path,
-      query: payload.query ?? null,
-      last_seen_ms: now,
-      attempts: upsertAttempt(existing.attempts, payload),
-    })
+    (existing, now) => {
+      const nextRequestedModel = payload.requested_model ?? existing.requested_model ?? null;
+      return {
+        ...existing,
+        cli_key: payload.cli_key,
+        method: payload.method,
+        path: payload.path,
+        query: payload.query ?? null,
+        requested_model: nextRequestedModel,
+        last_seen_ms: now,
+        attempts: upsertAttempt(existing.attempts, payload),
+      };
+    }
   );
 }
 
@@ -202,21 +206,25 @@ export function ingestTraceRequest(payload: GatewayRequestEvent) {
       method: payload.method,
       path: payload.path,
       query: payload.query ?? null,
-      requested_model: null,
+      requested_model: payload.requested_model ?? null,
       first_seen_ms: now,
       last_seen_ms: now,
       attempts: [],
       summary: payload,
     }),
-    (existing, now) => ({
-      ...existing,
-      cli_key: payload.cli_key,
-      method: payload.method,
-      path: payload.path,
-      query: payload.query ?? null,
-      last_seen_ms: now,
-      summary: payload,
-    })
+    (existing, now) => {
+      const nextRequestedModel = payload.requested_model ?? existing.requested_model ?? null;
+      return {
+        ...existing,
+        cli_key: payload.cli_key,
+        method: payload.method,
+        path: payload.path,
+        query: payload.query ?? null,
+        requested_model: nextRequestedModel,
+        last_seen_ms: now,
+        summary: payload,
+      };
+    }
   );
 }
 

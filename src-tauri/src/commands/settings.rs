@@ -29,6 +29,7 @@ pub(crate) struct SettingsUpdate {
     pub enable_claude_metadata_user_id_injection: Option<bool>,
     pub enable_cache_anomaly_monitor: Option<bool>,
     pub enable_task_complete_notify: Option<bool>,
+    pub enable_notification_sound: Option<bool>,
     pub enable_response_fixer: Option<bool>,
     pub response_fixer_fix_encoding: Option<bool>,
     pub response_fixer_fix_sse_format: Option<bool>,
@@ -84,6 +85,7 @@ pub(crate) async fn settings_set(
         enable_claude_metadata_user_id_injection,
         enable_cache_anomaly_monitor,
         enable_task_complete_notify,
+        enable_notification_sound,
         enable_response_fixer,
         response_fixer_fix_encoding,
         response_fixer_fix_sse_format,
@@ -168,6 +170,8 @@ pub(crate) async fn settings_set(
                 enable_cache_anomaly_monitor.unwrap_or(previous.enable_cache_anomaly_monitor);
             let enable_task_complete_notify =
                 enable_task_complete_notify.unwrap_or(previous.enable_task_complete_notify);
+            let enable_notification_sound =
+                enable_notification_sound.unwrap_or(previous.enable_notification_sound);
             let enable_response_fixer =
                 enable_response_fixer.unwrap_or(previous.enable_response_fixer);
             let response_fixer_fix_encoding =
@@ -246,6 +250,7 @@ pub(crate) async fn settings_set(
                 enable_claude_metadata_user_id_injection,
                 enable_cache_anomaly_monitor,
                 enable_task_complete_notify,
+                enable_notification_sound,
                 enable_response_fixer,
                 response_fixer_fix_encoding,
                 response_fixer_fix_sse_format,

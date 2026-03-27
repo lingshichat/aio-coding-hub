@@ -25,6 +25,10 @@ import {
   useTaskCompleteNotifyEnabled,
 } from "../services/taskCompleteNotifyEvents";
 import {
+  setNotificationSoundEnabled,
+  useNotificationSoundEnabled,
+} from "../services/notificationSound";
+import {
   useSettingsCircuitBreakerNoticeSetMutation,
   useSettingsCodexSessionIdCompletionSetMutation,
   useSettingsGatewayRectifierSetMutation,
@@ -119,6 +123,7 @@ export function CliManagerPage() {
   const [codexSessionIdCompletionEnabled, setCodexSessionIdCompletionEnabled] = useState(true);
   const cacheAnomalyMonitorEnabled = useCacheAnomalyMonitorEnabled();
   const taskCompleteNotifyEnabled = useTaskCompleteNotifyEnabled();
+  const notificationSoundEnabled = useNotificationSoundEnabled();
   const [upstreamFirstByteTimeoutSeconds, setUpstreamFirstByteTimeoutSeconds] = useState<number>(0);
   const [upstreamStreamIdleTimeoutSeconds, setUpstreamStreamIdleTimeoutSeconds] =
     useState<number>(0);
@@ -194,6 +199,7 @@ export function CliManagerPage() {
     setCodexSessionIdCompletionEnabled(appSettings.enable_codex_session_id_completion ?? true);
     setCacheAnomalyMonitorEnabled(appSettings.enable_cache_anomaly_monitor ?? false);
     setTaskCompleteNotifyEnabled(appSettings.enable_task_complete_notify ?? true);
+    setNotificationSoundEnabled(appSettings.enable_notification_sound ?? true);
     setUpstreamFirstByteTimeoutSeconds(appSettings.upstream_first_byte_timeout_seconds);
     setUpstreamStreamIdleTimeoutSeconds(appSettings.upstream_stream_idle_timeout_seconds);
     setUpstreamRequestTimeoutNonStreamingSeconds(
@@ -325,6 +331,27 @@ export function CliManagerPage() {
     }
   }
 
+  async function persistNotificationSound(enable: boolean) {
+    if (commonSettingsSaving) return;
+    if (rectifierAvailable !== "available") return;
+
+    const prev = notificationSoundEnabled;
+    setNotificationSoundEnabled(enable);
+    try {
+      const updated = await persistCommonSettings({ enable_notification_sound: enable });
+      if (!updated) {
+        setNotificationSoundEnabled(prev);
+        return;
+      }
+
+      const next = updated.enable_notification_sound ?? enable;
+      setNotificationSoundEnabled(next);
+      toast(next ? "已开启通知音效" : "已关闭通知音效");
+    } catch {
+      setNotificationSoundEnabled(prev);
+    }
+  }
+
   async function persistCommonSettings(patch: Partial<AppSettings>): Promise<AppSettings | null> {
     if (commonSettingsSaving) return null;
     if (rectifierAvailable !== "available") return null;
@@ -349,6 +376,7 @@ export function CliManagerPage() {
           next.upstream_request_timeout_non_streaming_seconds,
         enableCacheAnomalyMonitor: next.enable_cache_anomaly_monitor,
         enableTaskCompleteNotify: next.enable_task_complete_notify,
+        enableNotificationSound: next.enable_notification_sound,
         failoverMaxAttemptsPerProvider: next.failover_max_attempts_per_provider,
         failoverMaxProvidersToTry: next.failover_max_providers_to_try,
         circuitBreakerFailureThreshold: next.circuit_breaker_failure_threshold,
@@ -617,6 +645,9 @@ export function CliManagerPage() {
             taskCompleteNotifyEnabled={taskCompleteNotifyEnabled}
             taskCompleteNotifySaving={commonSettingsSaving}
             onPersistTaskCompleteNotify={persistTaskCompleteNotify}
+            notificationSoundEnabled={notificationSoundEnabled}
+            notificationSoundSaving={commonSettingsSaving}
+            onPersistNotificationSound={persistNotificationSound}
             appSettings={appSettings}
             commonSettingsSaving={commonSettingsSaving}
             onPersistCommonSettings={persistCommonSettings}

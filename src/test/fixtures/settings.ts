@@ -43,6 +43,7 @@ export function createTestAppSettings(overrides?: Partial<AppSettings>): AppSett
     enable_claude_metadata_user_id_injection: true,
     enable_cache_anomaly_monitor: false,
     enable_task_complete_notify: true,
+    enable_notification_sound: true,
     enable_response_fixer: true,
     response_fixer_fix_encoding: true,
     response_fixer_fix_sse_format: true,

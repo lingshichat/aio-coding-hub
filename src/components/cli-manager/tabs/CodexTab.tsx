@@ -387,7 +387,9 @@ export function CliManagerCodexTab({
       return "当前路径跟随 $CODEX_HOME 解析；后续会随环境变量变化。";
     }
 
-    return "当前固定使用 Windows 用户目录下的 .codex。";
+    return isWindowsRuntime()
+      ? "当前固定使用 Windows 用户目录下的 .codex。"
+      : "当前固定使用用户主目录下的 .codex。";
   }, [configLocationMode]);
 
   const activeConfigModeBadgeText = useMemo(() => {

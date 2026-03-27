@@ -246,6 +246,7 @@ impl RequestLogEnqueueArgs {
             self.method.clone(),
             self.path.clone(),
             self.query.clone(),
+            self.requested_model.clone(),
             self.status,
             error_category,
             self.error_code,

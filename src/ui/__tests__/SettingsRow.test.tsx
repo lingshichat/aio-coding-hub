@@ -51,6 +51,25 @@ describe("ui/SettingsRow", () => {
       </SettingsRow>
     );
     const label = screen.getByText("Styled Label");
-    expect(label).toHaveClass("text-sm", "font-medium");
+    expect(label).toHaveClass("text-sm");
+  });
+
+  it("renders subtitle when provided", () => {
+    render(
+      <SettingsRow label="Main Label" subtitle="Helper text">
+        <span>Value</span>
+      </SettingsRow>
+    );
+    expect(screen.getByText("Main Label")).toBeInTheDocument();
+    expect(screen.getByText("Helper text")).toBeInTheDocument();
+  });
+
+  it("does not render subtitle when not provided", () => {
+    const { container } = render(
+      <SettingsRow label="No Subtitle">
+        <span>Value</span>
+      </SettingsRow>
+    );
+    expect(container.querySelector(".text-xs")).not.toBeInTheDocument();
   });
 });

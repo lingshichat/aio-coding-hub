@@ -46,6 +46,7 @@ pub(super) async fn emit_attempt_event_and_log(
         method: ctx.method_hint.clone(),
         path: ctx.forwarded_path.clone(),
         query: ctx.query.clone(),
+        requested_model: ctx.requested_model.clone(),
         attempt_index,
         provider_id,
         session_reuse,

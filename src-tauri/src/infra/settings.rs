@@ -9,7 +9,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::{Duration, Instant};
 use tauri::Manager;
 
-pub const SCHEMA_VERSION: u32 = 24;
+pub const SCHEMA_VERSION: u32 = 25;
 const SCHEMA_VERSION_DISABLE_UPSTREAM_TIMEOUTS: u32 = 7;
 const SCHEMA_VERSION_ADD_GATEWAY_RECTIFIERS: u32 = 8;
 const SCHEMA_VERSION_ADD_CIRCUIT_BREAKER_NOTICE: u32 = 9;
@@ -28,6 +28,7 @@ const SCHEMA_VERSION_ADD_HOME_USAGE_PERIOD: u32 = 21;
 const SCHEMA_VERSION_ADD_SHOW_HOME_USAGE: u32 = 22;
 const SCHEMA_VERSION_ADD_CODEX_HOME_OVERRIDE: u32 = 23;
 const SCHEMA_VERSION_ADD_CODEX_HOME_MODE: u32 = 24;
+const SCHEMA_VERSION_ADD_NOTIFICATION_SOUND: u32 = 25;
 pub const DEFAULT_GATEWAY_PORT: u16 = 37123;
 pub const MAX_GATEWAY_PORT: u16 = 37199;
 const DEFAULT_LOG_RETENTION_DAYS: u32 = 7;
@@ -49,6 +50,7 @@ const DEFAULT_ENABLE_CODEX_SESSION_ID_COMPLETION: bool = true;
 const DEFAULT_ENABLE_CLAUDE_METADATA_USER_ID_INJECTION: bool = true;
 const DEFAULT_ENABLE_CACHE_ANOMALY_MONITOR: bool = false;
 const DEFAULT_ENABLE_TASK_COMPLETE_NOTIFY: bool = true;
+const DEFAULT_ENABLE_NOTIFICATION_SOUND: bool = true;
 const DEFAULT_ENABLE_RESPONSE_FIXER: bool = true;
 const DEFAULT_ENABLE_CLI_PROXY_STARTUP_RECOVERY: bool = true;
 const DEFAULT_SHOW_HOME_HEATMAP: bool = true;
@@ -235,6 +237,8 @@ pub struct AppSettings {
     pub enable_cache_anomaly_monitor: bool,
     // Task complete notification (default enabled).
     pub enable_task_complete_notify: bool,
+    // Notification sound toggle - play custom sound when notifications fire (default enabled).
+    pub enable_notification_sound: bool,
     // Response fixer (default enabled).
     pub enable_response_fixer: bool,
     pub response_fixer_fix_encoding: bool,
@@ -287,6 +291,7 @@ impl Default for AppSettings {
                 DEFAULT_ENABLE_CLAUDE_METADATA_USER_ID_INJECTION,
             enable_cache_anomaly_monitor: DEFAULT_ENABLE_CACHE_ANOMALY_MONITOR,
             enable_task_complete_notify: DEFAULT_ENABLE_TASK_COMPLETE_NOTIFY,
+            enable_notification_sound: DEFAULT_ENABLE_NOTIFICATION_SOUND,
             enable_response_fixer: DEFAULT_ENABLE_RESPONSE_FIXER,
             response_fixer_fix_encoding: DEFAULT_RESPONSE_FIXER_FIX_ENCODING,
             response_fixer_fix_sse_format: DEFAULT_RESPONSE_FIXER_FIX_SSE_FORMAT,
@@ -745,9 +750,21 @@ fn migrate_add_codex_home_mode(settings: &mut AppSettings, schema_version_presen
     changed
 }
 
+fn migrate_add_notification_sound(
+    settings: &mut AppSettings,
+    schema_version_present: bool,
+) -> bool {
+    // v25: Add notification sound toggle (default enabled).
+    migrate_bump_schema_version(
+        settings,
+        schema_version_present,
+        SCHEMA_VERSION_ADD_NOTIFICATION_SOUND,
+    )
+}
+
 type SettingsMigration = fn(&mut AppSettings, bool) -> bool;
 
-const SETTINGS_MIGRATIONS: [SettingsMigration; 18] = [
+const SETTINGS_MIGRATIONS: [SettingsMigration; 19] = [
     migrate_disable_upstream_timeouts,
     migrate_add_gateway_rectifiers,
     migrate_add_circuit_breaker_notice,
@@ -766,6 +783,7 @@ const SETTINGS_MIGRATIONS: [SettingsMigration; 18] = [
     migrate_add_show_home_usage,
     migrate_add_codex_home_override,
     migrate_add_codex_home_mode,
+    migrate_add_notification_sound,
 ];
 
 fn apply_settings_migrations(settings: &mut AppSettings, schema_version_present: bool) -> bool {

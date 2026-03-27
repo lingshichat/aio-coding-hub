@@ -11,6 +11,7 @@ import { listen } from "@tauri-apps/api/event";
 import { appEventNames } from "../constants/appEvents";
 import { logToConsole } from "./consoleLog";
 import type { NoticeLevel } from "./notice";
+import { getNotificationSoundEnabled, playNotificationSound } from "./notificationSound";
 
 export type NoticeEventPayload = {
   level: NoticeLevel;
@@ -29,7 +30,14 @@ export async function listenNoticeEvents(): Promise<() => void> {
       const permissionGranted = await isPermissionGranted();
       if (!permissionGranted) return;
 
-      await sendNotification({ title: payload.title, body: payload.body });
+      if (getNotificationSoundEnabled()) {
+        // Custom sound enabled: play ding.mp3 and send silent notification
+        playNotificationSound();
+        await sendNotification({ title: payload.title, body: payload.body, silent: true });
+      } else {
+        // Custom sound disabled: normal system notification with default sound
+        await sendNotification({ title: payload.title, body: payload.body });
+      }
     } catch (err) {
       logToConsole("error", "发送系统通知失败", {
         error: String(err),

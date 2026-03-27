@@ -84,6 +84,7 @@ export type AppSettings = {
   enable_claude_metadata_user_id_injection: boolean;
   enable_cache_anomaly_monitor: boolean;
   enable_task_complete_notify: boolean;
+  enable_notification_sound: boolean;
   enable_response_fixer: boolean;
   response_fixer_fix_encoding: boolean;
   response_fixer_fix_sse_format: boolean;
@@ -183,6 +184,7 @@ export type SettingsUpdate = {
   enableClaudeMetadataUserIdInjection: boolean | null;
   enableCacheAnomalyMonitor: boolean | null;
   enableTaskCompleteNotify: boolean | null;
+  enableNotificationSound: boolean | null;
   enableResponseFixer: boolean | null;
   responseFixerFixEncoding: boolean | null;
   responseFixerFixSseFormat: boolean | null;

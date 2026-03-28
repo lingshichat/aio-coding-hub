@@ -6,7 +6,7 @@ import { PERIOD_ITEMS } from "../../constants/periods";
 import { Card } from "../../ui/Card";
 import { Input } from "../../ui/Input";
 import { cn } from "../../utils/cn";
-import { formatUsdRaw } from "../../utils/formatters";
+import { formatUsd } from "../../utils/formatters";
 import { Calendar, Filter, RefreshCw, ChevronDown } from "lucide-react";
 import type { CostPeriod } from "../../services/cost";
 import type { CostProviderBreakdownRowV1, CostModelBreakdownRowV1 } from "../../services/cost";
@@ -230,8 +230,7 @@ export function CostFilterPanel({
                 <option value="all">全部</option>
                 {providerOptions.map((row) => (
                   <option key={`${row.cli_key}:${row.provider_id}`} value={String(row.provider_id)}>
-                    {cliShortLabel(row.cli_key)} · {row.provider_name} ({formatUsdRaw(row.cost_usd)}
-                    )
+                    {cliShortLabel(row.cli_key)} · {row.provider_name} ({formatUsd(row.cost_usd)})
                   </option>
                 ))}
               </select>
@@ -259,7 +258,7 @@ export function CostFilterPanel({
                 <option value="all">全部</option>
                 {modelOptions.map((row) => (
                   <option key={row.model} value={row.model}>
-                    {row.model} ({formatUsdRaw(row.cost_usd)})
+                    {row.model} ({formatUsd(row.cost_usd)})
                   </option>
                 ))}
               </select>

@@ -5,7 +5,7 @@ import { useMemo } from "react";
 import { ResponsiveContainer, PieChart, Pie, Cell, Label, Tooltip } from "recharts";
 import { CHART_PALETTE } from "../../constants/colors";
 import { Card } from "../../ui/Card";
-import { formatUsdRaw } from "../../utils/formatters";
+import { formatUsd } from "../../utils/formatters";
 import { getTooltipStyle } from "../charts/chartTheme";
 import { CHART_ANIMATION } from "../charts/chartTheme";
 import type { CostPeriod } from "../../services/cost";
@@ -53,7 +53,7 @@ function DonutChart({
             />
           ))}
           <Label
-            value={formatUsdRaw(total)}
+            value={formatUsd(total)}
             position="center"
             style={{
               fontSize: 14,
@@ -65,7 +65,7 @@ function DonutChart({
         <Tooltip
           contentStyle={tooltipStyle}
           formatter={(value: number, name: string) => [
-            `${formatUsdRaw(value)} (${((value / total) * 100).toFixed(1)}%)`,
+            `${formatUsd(value)} (${((value / total) * 100).toFixed(1)}%)`,
             name,
           ]}
         />

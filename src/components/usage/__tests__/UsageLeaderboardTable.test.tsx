@@ -85,7 +85,7 @@ describe("components/usage/UsageLeaderboardTable", () => {
 
     expect(screen.getByText("Row A")).toBeInTheDocument();
     expect(screen.getByText("Row B")).toBeInTheDocument();
-    expect(screen.getByText("$2.50")).toBeInTheDocument();
+    expect(screen.getAllByText("$2.500000").length).toBeGreaterThan(0);
     expect(screen.getAllByRole("progressbar").length).toBe(2);
   });
 });

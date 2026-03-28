@@ -22,7 +22,7 @@ import {
   formatRelativeTimeFromUnixSeconds,
   formatTokensPerSecond,
   formatTokensPerSecondShort,
-  formatUsdRaw,
+  formatUsd,
   sanitizeTtfbMs,
 } from "../../utils/formatters";
 import {
@@ -154,7 +154,7 @@ const RequestLogCard = memo(function RequestLogCard({
   const showCostMultiplier =
     Number.isFinite(costMultiplier) && costMultiplier >= 0 && Math.abs(costMultiplier - 1) > 0.0001;
   const costMultiplierText = isFree ? "免费" : `x${costMultiplier.toFixed(2)}`;
-  const rawCostUsdText = formatUsdRaw(log.cost_usd);
+  const costUsdText = formatUsd(log.cost_usd);
 
   const cacheWrite = (() => {
     // 优先展示有值的 TTL 桶；若都为 0，则仍展示 0 而不是 "—"。
@@ -337,11 +337,11 @@ const RequestLogCard = memo(function RequestLogCard({
                 </div>
                 <div
                   className="flex items-center gap-1 h-4"
-                  title={rawCostUsdText === "—" ? undefined : rawCostUsdText}
+                  title={costUsdText === "—" ? undefined : costUsdText}
                 >
                   <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">花费</span>
                   <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
-                    {rawCostUsdText}
+                    {costUsdText}
                   </span>
                 </div>
 

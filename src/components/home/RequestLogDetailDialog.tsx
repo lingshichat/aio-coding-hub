@@ -15,7 +15,7 @@ import {
   computeOutputTokensPerSecond,
   formatDurationMs,
   formatTokensPerSecond,
-  formatUsdRaw,
+  formatUsd,
   sanitizeTtfbMs,
 } from "../../utils/formatters";
 import { ProviderChainView } from "../ProviderChainView";
@@ -127,7 +127,7 @@ export function RequestLogDetailDialog({
                     return rate != null ? formatTokensPerSecond(rate) : "—";
                   })()}
                 />
-                <MetricCard label="花费" value={formatUsdRaw(selectedLog.cost_usd)} />
+                <MetricCard label="花费" value={formatUsd(selectedLog.cost_usd)} />
               </div>
             </Card>
           ) : null}

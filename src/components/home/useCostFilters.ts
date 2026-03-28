@@ -11,7 +11,7 @@ import { useCostAnalyticsV1Query } from "../../query/cost";
 import type { CliKey } from "../../services/providers";
 import type { CostPeriod, CostScatterCliProviderModelRowV1 } from "../../services/cost";
 import { buildRecentDayKeys, dayKeyFromLocalDate } from "../../utils/dateKeys";
-import { formatInteger, formatPercent, formatUsdRaw } from "../../utils/formatters";
+import { formatInteger, formatPercent, formatUsd } from "../../utils/formatters";
 import { pickTopSlices, toDateLabel } from "../../utils/chartHelpers";
 
 export type CliFilter = "all" | CliKey;
@@ -267,7 +267,7 @@ export function useCostFilters() {
     return [
       {
         title: "总花费（已计算）",
-        value: formatUsdRaw(summary.total_cost_usd),
+        value: formatUsd(summary.total_cost_usd),
         hint: successHint,
         testId: "home-cost-total-cost",
       },

@@ -14,7 +14,7 @@ import {
   formatInteger,
   formatTokensPerSecond,
   formatTokensPerSecondShort,
-  formatUsdRaw,
+  formatUsd,
   sanitizeTtfbMs,
 } from "../../utils/formatters";
 import { Clock, Server, Loader2, CheckCircle2, XCircle } from "lucide-react";
@@ -261,7 +261,7 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
           trace.summary?.cache_read_input_tokens ?? (isClientAbort ? 0 : null);
         const displayCacheWriteTokens = cacheWrite.tokens ?? (isClientAbort ? 0 : null);
         const displayCostUsd = trace.summary?.cost_usd ?? (isClientAbort ? 0 : null);
-        const displayCostText = displayCostUsd == null ? "—" : formatUsdRaw(displayCostUsd);
+        const displayCostText = displayCostUsd == null ? "—" : formatUsd(displayCostUsd);
         const costMultiplier =
           typeof trace.summary?.cost_multiplier === "number" ? trace.summary.cost_multiplier : null;
         const isFree = costMultiplier === 0;

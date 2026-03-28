@@ -22,7 +22,7 @@ import {
   formatDurationMs,
   formatDurationMsShort,
   formatInteger,
-  formatUsdRaw,
+  formatUsd,
 } from "../../utils/formatters";
 import {
   CHART_COLORS,
@@ -83,7 +83,7 @@ function ScatterChartInner({ data, isDark }: { data: ScatterPoint[]; isDark: boo
           {cliLabel} · {providerText} · {modelText}
         </div>
         <div style={{ fontSize: 11, color: isDark ? "#94a3b8" : "#64748b" }}>
-          总成本：{formatUsdRaw(meta.total_cost_usd)}
+          总成本：{formatUsd(meta.total_cost_usd)}
         </div>
         <div style={{ fontSize: 11, color: isDark ? "#94a3b8" : "#64748b" }}>
           总耗时：{formatDurationMs(meta.total_duration_ms)}
@@ -94,7 +94,7 @@ function ScatterChartInner({ data, isDark }: { data: ScatterPoint[]; isDark: boo
         <div style={{ fontSize: 11, color: isDark ? "#cbd5e1" : "#94a3b8" }}>
           {avgCostUsd == null
             ? "均值：—"
-            : `均值：${formatUsdRaw(avgCostUsd)} / ${formatDurationMs(avgDurationMs ?? 0)}`}
+            : `均值：${formatUsd(avgCostUsd)} / ${formatDurationMs(avgDurationMs ?? 0)}`}
         </div>
       </div>
     );
@@ -117,7 +117,7 @@ function ScatterChartInner({ data, isDark }: { data: ScatterPoint[]; isDark: boo
           axisLine={{ stroke: axisLineStroke }}
           tickLine={false}
           tick={{ ...axisStyle }}
-          tickFormatter={formatUsdRaw}
+          tickFormatter={formatUsd}
         />
         <YAxis
           type="number"

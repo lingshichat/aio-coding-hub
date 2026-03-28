@@ -15,7 +15,7 @@ import { Card } from "../../ui/Card";
 import { EmptyState } from "../../ui/EmptyState";
 import { Spinner } from "../../ui/Spinner";
 import { cn } from "../../utils/cn";
-import { formatUsdRaw } from "../../utils/formatters";
+import { formatUsd } from "../../utils/formatters";
 import {
   CHART_COLORS,
   getAxisStyle,
@@ -77,13 +77,13 @@ function TrendAreaChart({
           axisLine={false}
           tickLine={false}
           tick={{ ...axisStyle }}
-          tickFormatter={formatUsdRaw}
-          width={50}
+          tickFormatter={formatUsd}
+          width={92}
         />
         <Tooltip
           contentStyle={tooltipStyle}
           labelStyle={{ fontWeight: 600, marginBottom: 4 }}
-          formatter={(value: number) => [formatUsdRaw(value), "Cost"]}
+          formatter={(value: number) => [formatUsd(value), "Cost"]}
           cursor={{ stroke: cursorStroke, strokeWidth: 1 }}
         />
         <Area

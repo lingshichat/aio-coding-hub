@@ -111,8 +111,8 @@ describe("components/home/RealtimeTraceCards", () => {
     expect(screen.getAllByText("会话复用").length).toBeGreaterThan(0);
     expect(screen.getByTitle("P1 → P2")).toBeInTheDocument();
     expect(screen.getAllByText(/t\/s/).length).toBeGreaterThan(0);
-    expect(screen.getByText("$1.23")).toBeInTheDocument();
-    expect(screen.getAllByText("$0").length).toBeGreaterThan(0);
+    expect(screen.getByText("$1.230000")).toBeInTheDocument();
+    expect(screen.getAllByText("$0.000000").length).toBeGreaterThan(0);
 
     vi.useRealTimers();
   });

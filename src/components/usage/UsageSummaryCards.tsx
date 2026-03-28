@@ -2,12 +2,7 @@
 
 import type { UsageSummary } from "../../services/usage";
 import { computeCacheHitRate } from "../../utils/cacheRateMetrics";
-import {
-  formatInteger,
-  formatPercent,
-  formatUsdCompact,
-  formatDurationMs,
-} from "../../utils/formatters";
+import { formatInteger, formatPercent, formatUsd, formatDurationMs } from "../../utils/formatters";
 import { StatCard, StatCardSkeleton } from "./StatCard";
 
 const SUMMARY_CARD_COUNT = 5;
@@ -70,7 +65,7 @@ function buildCardConfigs({
     {
       key: "total_cost_usd",
       title: "总消耗金额",
-      value: formatUsdCompact(totalCostUsd),
+      value: formatUsd(totalCostUsd),
       accent: "orange",
       hint: leaderboardCount > 0 ? `${leaderboardCount} 个维度合计` : undefined,
     },

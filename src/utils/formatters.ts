@@ -114,6 +114,7 @@ export function formatUsd(value: number | null | undefined) {
   }
 }
 
+// Keep raw output for debug-style displays; user-facing cost UI should prefer `formatUsd`.
 export function formatUsdRaw(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "—";
   return `$${String(value)}`;

@@ -6,8 +6,7 @@ import {
   formatInteger,
   formatPercent,
   formatTokensPerSecond,
-  formatUsdRaw,
-  formatUsdCompact,
+  formatUsd,
 } from "../../utils/formatters";
 import { TokenBreakdown } from "./TokenBreakdown";
 import { CacheBreakdown } from "./CacheBreakdown";
@@ -124,11 +123,11 @@ function UsageLeaderboardDataRow({
           cacheReadInputTokens={row.cache_read_input_tokens}
         />
       </td>
-      <td className={MONO_TD}>{formatUsdRaw(row.cost_usd)}</td>
+      <td className={MONO_TD}>{formatUsd(row.cost_usd)}</td>
       <td className={`${TD_CLASS} min-w-[120px]`}>
         <CostBar percent={costPercent} />
       </td>
-      <td className={MONO_TD}>{per1k != null ? formatUsdCompact(per1k) : "—"}</td>
+      <td className={MONO_TD}>{per1k != null ? formatUsd(per1k) : "—"}</td>
       <td className={MONO_TD}>{formatDurationMs(row.avg_duration_ms)}</td>
       <td className={MONO_TD}>{formatDurationMs(row.avg_ttfb_ms)}</td>
       <td className={MONO_TD}>{formatTokensPerSecond(row.avg_output_tokens_per_second)}</td>
@@ -150,7 +149,7 @@ function UsageLeaderboardSummaryRow({
   );
   const costPer1kText =
     rowsTotalIoTokens > 0 && totalCostUsd > 0
-      ? formatUsdCompact((totalCostUsd / rowsTotalIoTokens) * 1000)
+      ? formatUsd((totalCostUsd / rowsTotalIoTokens) * 1000)
       : "—";
 
   return (
@@ -188,7 +187,7 @@ function UsageLeaderboardSummaryRow({
         />
       </td>
       <td className={`${MONO_TD} font-medium text-slate-900 dark:text-slate-100`}>
-        {formatUsdCompact(totalCostUsd)}
+        {formatUsd(totalCostUsd)}
       </td>
       <td className={TD_CLASS}>
         <span className="text-xs text-slate-500 dark:text-slate-400">100%</span>

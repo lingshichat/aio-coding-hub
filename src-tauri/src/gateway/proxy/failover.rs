@@ -29,7 +29,14 @@ pub(super) fn retry_backoff_delay(
     status: reqwest::StatusCode,
     retry_index: u32,
 ) -> Option<Duration> {
-    if !matches!(status.as_u16(), 408 | 429) {
+    let code = status.as_u16();
+
+    // 5xx: brief pause before switching provider to avoid rapid-fire exhaustion
+    if (500..600).contains(&code) && !matches!(code, 408 | 429) {
+        return Some(Duration::from_millis(100));
+    }
+
+    if !matches!(code, 408 | 429) {
         return None;
     }
 

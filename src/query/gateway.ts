@@ -36,9 +36,9 @@ function normalizeGatewayCircuitUnix(value: number | null | undefined) {
 export function getGatewayCircuitDerivedState(
   row: GatewayProviderCircuitStatus | null | undefined
 ): GatewayCircuitDerivedState {
-  const isOpen = row?.state === "OPEN";
+  const isOpen = row?.state === "OPEN" || row?.state === "HALF_OPEN";
   const cooldownUntil = normalizeGatewayCircuitUnix(row?.cooldown_until);
-  const openUntil = isOpen ? normalizeGatewayCircuitUnix(row?.open_until) : null;
+  const openUntil = row?.state === "OPEN" ? normalizeGatewayCircuitUnix(row?.open_until) : null;
   const unavailableUntil =
     openUntil == null
       ? cooldownUntil

@@ -430,10 +430,13 @@ function formatGatewayCircuit(d: Record<string, unknown>): string {
   const prevState = String(d.prev_state ?? "");
   const nextState = String(d.next_state ?? "");
   const isOpen = nextState === "熔断" || nextState === "OPEN";
+  const isHalfOpen = nextState === "半开" || nextState === "HALF_OPEN";
   const isClosed = nextState === "正常" || nextState === "CLOSED";
 
   if (isOpen) {
     lines.push("🔴 熔断器触发");
+  } else if (isHalfOpen) {
+    lines.push("🟡 熔断器半开试探");
   } else if (isClosed) {
     lines.push("🟢 熔断器恢复");
   } else {

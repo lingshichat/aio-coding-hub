@@ -299,16 +299,22 @@ pub(super) fn emit_circuit_transition(
     let prev_state_text = match transition.prev_state {
         circuit_breaker::CircuitState::Closed => "正常",
         circuit_breaker::CircuitState::Open => "熔断",
+        circuit_breaker::CircuitState::HalfOpen => "半开",
     };
     let next_state_text = match transition.next_state {
         circuit_breaker::CircuitState::Closed => "正常",
         circuit_breaker::CircuitState::Open => "熔断",
+        circuit_breaker::CircuitState::HalfOpen => "半开",
     };
 
     let (level, title) = match transition.next_state {
         circuit_breaker::CircuitState::Open => (
             notice::NoticeLevel::Warning,
             format!("熔断触发：{provider_name}"),
+        ),
+        circuit_breaker::CircuitState::HalfOpen => (
+            notice::NoticeLevel::Info,
+            format!("熔断试探：{provider_name}"),
         ),
         circuit_breaker::CircuitState::Closed => (
             notice::NoticeLevel::Success,
@@ -318,7 +324,9 @@ pub(super) fn emit_circuit_transition(
 
     let reason_text = match transition.reason {
         "FAILURE_THRESHOLD_REACHED" => "失败次数达到阈值",
-        "OPEN_EXPIRED" => "熔断到期自动恢复",
+        "OPEN_EXPIRED" => "熔断到期，进入半开试探",
+        "HALF_OPEN_SUCCESS" => "半开试探成功，恢复正常",
+        "HALF_OPEN_FAILURE" => "半开试探失败，重新熔断",
         other => other,
     };
 

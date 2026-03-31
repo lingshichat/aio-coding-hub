@@ -12,6 +12,7 @@ const DEFAULT_OPEN_DURATION_SECS: i64 = 30 * 60;
 pub enum CircuitState {
     Closed,
     Open,
+    HalfOpen,
 }
 
 impl CircuitState {
@@ -19,12 +20,14 @@ impl CircuitState {
         match self {
             Self::Closed => "CLOSED",
             Self::Open => "OPEN",
+            Self::HalfOpen => "HALF_OPEN",
         }
     }
 
     pub fn from_str(raw: &str) -> Self {
         match raw {
             "OPEN" => Self::Open,
+            "HALF_OPEN" => Self::HalfOpen,
             _ => Self::Closed,
         }
     }
@@ -172,8 +175,7 @@ impl CircuitBreaker {
                 let expired = entry.open_until.map(|t| now_unix >= t).unwrap_or(true);
                 if expired {
                     let prev = entry.state;
-                    entry.state = CircuitState::Closed;
-                    entry.failure_count = 0;
+                    entry.state = CircuitState::HalfOpen;
                     entry.open_until = None;
                     entry.updated_at = now_unix;
 
@@ -208,6 +210,7 @@ impl CircuitBreaker {
 
     pub fn record_success(&self, provider_id: i64, now_unix: i64) -> CircuitChange {
         let mut upsert: Option<CircuitPersistedState> = None;
+        let mut transition: Option<CircuitTransition> = None;
 
         let (before, after) = {
             let mut guard = self.health.lock_or_recover();
@@ -226,6 +229,22 @@ impl CircuitBreaker {
                         upsert = Some(self.persisted_from_health(provider_id, entry));
                     }
                 }
+                CircuitState::HalfOpen => {
+                    let prev = entry.state;
+                    entry.state = CircuitState::Closed;
+                    entry.failure_count = 0;
+                    entry.cooldown_until = None;
+                    entry.updated_at = now_unix;
+
+                    let t = CircuitTransition {
+                        prev_state: prev,
+                        next_state: entry.state,
+                        reason: "HALF_OPEN_SUCCESS",
+                        snapshot: self.snapshot_from_health(provider_id, entry),
+                    };
+                    transition = Some(t);
+                    upsert = Some(self.persisted_from_health(provider_id, entry));
+                }
                 CircuitState::Open => {}
             }
 
@@ -240,7 +259,7 @@ impl CircuitBreaker {
         CircuitChange {
             before,
             after,
-            transition: None,
+            transition,
         }
     }
 
@@ -277,6 +296,23 @@ impl CircuitBreaker {
                         transition = Some(t);
                     }
 
+                    upsert = Some(self.persisted_from_health(provider_id, entry));
+                }
+                CircuitState::HalfOpen => {
+                    let prev = entry.state;
+                    entry.state = CircuitState::Open;
+                    entry.open_until =
+                        Some(now_unix.saturating_add(self.config.open_duration_secs));
+                    entry.updated_at = now_unix;
+
+                    let after = self.snapshot_from_health(provider_id, entry);
+                    let t = CircuitTransition {
+                        prev_state: prev,
+                        next_state: entry.state,
+                        reason: "HALF_OPEN_FAILURE",
+                        snapshot: after.clone(),
+                    };
+                    transition = Some(t);
                     upsert = Some(self.persisted_from_health(provider_id, entry));
                 }
                 CircuitState::Open => {}

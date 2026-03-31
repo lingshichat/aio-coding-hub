@@ -53,12 +53,16 @@ pub(super) fn gate_provider(
     }
 
     let snap = allow.after;
-    let reason = if snap.state == circuit_breaker::CircuitState::Open {
-        *skipped_open = skipped_open.saturating_add(1);
-        "SKIP_OPEN"
-    } else {
-        *skipped_cooldown = skipped_cooldown.saturating_add(1);
-        "SKIP_COOLDOWN"
+    let reason = match snap.state {
+        circuit_breaker::CircuitState::Open => {
+            *skipped_open = skipped_open.saturating_add(1);
+            "SKIP_OPEN"
+        }
+        _ => {
+            // Cooldown active (state is Closed or HalfOpen but cooldown_until is set)
+            *skipped_cooldown = skipped_cooldown.saturating_add(1);
+            "SKIP_COOLDOWN"
+        }
     };
 
     if let Some(until) = snap.cooldown_until.or(snap.open_until) {
@@ -384,7 +388,8 @@ mod tests {
         })
         .expect("should allow after expiry");
 
-        assert_eq!(snap.state, circuit_breaker::CircuitState::Closed);
+        // After open expires, circuit transitions to HalfOpen (probe state)
+        assert_eq!(snap.state, circuit_breaker::CircuitState::HalfOpen);
         assert_eq!(earliest, None);
         assert_eq!(skipped_open, 0);
         assert_eq!(skipped_cooldown, 0);

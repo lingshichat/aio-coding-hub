@@ -100,13 +100,14 @@ function normalizeLogLevel(level: unknown): "debug" | "info" | "warn" | "error" 
 
 function normalizeCircuitState(state: string | null | undefined) {
   if (!state) return null;
-  if (state === "OPEN" || state === "CLOSED") return state;
+  if (state === "OPEN" || state === "CLOSED" || state === "HALF_OPEN") return state;
   return null;
 }
 
 function circuitStateText(state: string | null | undefined) {
   const normalized = normalizeCircuitState(state);
   if (normalized === "OPEN") return "熔断";
+  if (normalized === "HALF_OPEN") return "半开";
   if (normalized === "CLOSED") return "正常";
   return "未知";
 }
@@ -118,7 +119,11 @@ function circuitReasonText(reason: string | null | undefined) {
     case "FAILURE_THRESHOLD_REACHED":
       return "失败次数达到阈值";
     case "OPEN_EXPIRED":
-      return "熔断到期";
+      return "熔断到期，进入半开试探";
+    case "HALF_OPEN_SUCCESS":
+      return "半开试探成功，恢复正常";
+    case "HALF_OPEN_FAILURE":
+      return "半开试探失败，重新熔断";
     case "SKIP_OPEN":
       return "熔断中已跳过";
     case "SKIP_COOLDOWN":

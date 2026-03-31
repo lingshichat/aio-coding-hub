@@ -258,6 +258,132 @@ describe("components/home/HomeRequestLogsPanel", () => {
     expect(screen.getByRole("button", { name: /claude-3-opus/ })).toBeInTheDocument();
   });
 
+  it("keeps in-progress request logs at the top while preserving time order for the rest", () => {
+    const nowMs = Date.now();
+    const requestLogs: RequestLogSummary[] = [
+      {
+        id: 21,
+        trace_id: "t-completed-newer",
+        cli_key: "codex",
+        method: "POST",
+        path: "/v1/responses",
+        requested_model: "done-newer-model",
+        status: 200,
+        error_code: null,
+        duration_ms: 1200,
+        ttfb_ms: 200,
+        attempt_count: 1,
+        has_failover: false,
+        start_provider_id: 1,
+        start_provider_name: "P1",
+        final_provider_id: 1,
+        final_provider_name: "P1",
+        route: [],
+        session_reuse: false,
+        input_tokens: 10,
+        output_tokens: 20,
+        total_tokens: 30,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation_5m_input_tokens: 0,
+        cache_creation_1h_input_tokens: 0,
+        cost_usd: 0.01,
+        cost_multiplier: 1,
+        created_at_ms: nowMs,
+        created_at: Math.floor(nowMs / 1000),
+      },
+      {
+        id: 22,
+        trace_id: "t-pending-older",
+        cli_key: "claude",
+        method: "POST",
+        path: "/v1/messages",
+        requested_model: "pending-model",
+        status: null,
+        error_code: null,
+        duration_ms: 0,
+        ttfb_ms: null,
+        attempt_count: 0,
+        has_failover: false,
+        start_provider_id: 0,
+        start_provider_name: "Unknown",
+        final_provider_id: 0,
+        final_provider_name: "Unknown",
+        route: [],
+        session_reuse: false,
+        input_tokens: null,
+        output_tokens: null,
+        total_tokens: null,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: null,
+        cache_creation_5m_input_tokens: null,
+        cache_creation_1h_input_tokens: null,
+        cost_usd: null,
+        cost_multiplier: 1,
+        created_at_ms: nowMs - 10_000,
+        created_at: Math.floor((nowMs - 10_000) / 1000),
+      },
+      {
+        id: 23,
+        trace_id: "t-completed-older",
+        cli_key: "gemini",
+        method: "POST",
+        path: "/v1/chat/completions",
+        requested_model: "done-older-model",
+        status: 500,
+        error_code: "GW_UPSTREAM_5XX",
+        duration_ms: 2200,
+        ttfb_ms: 400,
+        attempt_count: 1,
+        has_failover: false,
+        start_provider_id: 2,
+        start_provider_name: "P2",
+        final_provider_id: 2,
+        final_provider_name: "P2",
+        route: [],
+        session_reuse: false,
+        input_tokens: 5,
+        output_tokens: 6,
+        total_tokens: 11,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_creation_5m_input_tokens: 0,
+        cache_creation_1h_input_tokens: 0,
+        cost_usd: 0.02,
+        cost_multiplier: 1,
+        created_at_ms: nowMs - 20_000,
+        created_at: Math.floor((nowMs - 20_000) / 1000),
+      },
+    ];
+
+    render(
+      <MemoryRouter>
+        <HomeRequestLogsPanel
+          showCustomTooltip={false}
+          traces={[]}
+          requestLogs={requestLogs}
+          requestLogsLoading={false}
+          requestLogsRefreshing={false}
+          requestLogsAvailable={true}
+          onRefreshRequestLogs={vi.fn()}
+          selectedLogId={null}
+          onSelectLogId={vi.fn()}
+        />
+      </MemoryRouter>
+    );
+
+    const pendingButton = screen.getByRole("button", { name: /pending-model/ });
+    const completedNewerButton = screen.getByRole("button", { name: /done-newer-model/ });
+    const completedOlderButton = screen.getByRole("button", { name: /done-older-model/ });
+
+    expect(pendingButton.compareDocumentPosition(completedNewerButton)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    );
+    expect(completedNewerButton.compareDocumentPosition(completedOlderButton)).toBe(
+      Node.DOCUMENT_POSITION_FOLLOWING
+    );
+  });
+
   it("uses live trace data to show current provider and elapsed duration for in-progress logs", () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-03-29T12:00:00.000Z"));

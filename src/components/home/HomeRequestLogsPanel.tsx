@@ -67,6 +67,17 @@ function requestLogCreatedAtMs(log: RequestLogSummary) {
   return log.created_at * 1000;
 }
 
+function sortRequestLogsForDisplay(a: RequestLogSummary, b: RequestLogSummary) {
+  const aInProgress = isPersistedRequestLogInProgress(a);
+  const bInProgress = isPersistedRequestLogInProgress(b);
+  if (aInProgress !== bInProgress) return aInProgress ? -1 : 1;
+
+  const aTsMs = requestLogCreatedAtMs(a);
+  const bTsMs = requestLogCreatedAtMs(b);
+  if (aTsMs !== bTsMs) return bTsMs - aTsMs;
+  return b.id - a.id;
+}
+
 function mergeTraceWithRequestLog(
   trace: TraceSession,
   requestLog: RequestLogSummary | undefined
@@ -515,19 +526,23 @@ export function HomeRequestLogsPanel({
   );
   const displayedTraces = traces.length > 0 ? traces : previewTraces;
   const displayedRequestLogs = requestLogs.length > 0 ? requestLogs : previewRequestLogs;
+  const sortedRequestLogs = useMemo(() => {
+    if (displayedRequestLogs.length <= 1) return displayedRequestLogs;
+    return displayedRequestLogs.slice().sort(sortRequestLogsForDisplay);
+  }, [displayedRequestLogs]);
   const summaryText =
     summaryTextOverride ??
     (requestLogsAvailable === false
       ? "数据不可用"
-      : displayedRequestLogs.length === 0 && requestLogsLoading
+      : sortedRequestLogs.length === 0 && requestLogsLoading
         ? "加载中…"
         : requestLogsLoading || requestLogsRefreshing
-          ? `更新中… · 共 ${displayedRequestLogs.length} 条`
-          : `共 ${displayedRequestLogs.length} 条`);
+          ? `更新中… · 共 ${sortedRequestLogs.length} 条`
+          : `共 ${sortedRequestLogs.length} 条`);
   const realtimeTraceCandidates = useMemo(() => {
     const logsByTraceId = new Map<string, RequestLogSummary>();
     const claudePersistedTraceIds = new Set<string>();
-    for (const log of displayedRequestLogs) {
+    for (const log of sortedRequestLogs) {
       const traceId = log.trace_id?.trim();
       if (!traceId) continue;
       if (!logsByTraceId.has(traceId)) {
@@ -547,7 +562,7 @@ export function HomeRequestLogsPanel({
       .filter((t) => nowMs - t.first_seen_ms < 15 * 60 * 1000)
       .sort((a, b) => b.first_seen_ms - a.first_seen_ms)
       .slice(0, 20);
-  }, [displayedRequestLogs, displayedTraces]);
+  }, [displayedTraces, sortedRequestLogs]);
   const tracesByTraceId = useMemo(() => {
     const map = new Map<string, TraceSession>();
     for (const trace of displayedTraces) {
@@ -559,11 +574,11 @@ export function HomeRequestLogsPanel({
   }, [displayedTraces]);
   const hasLiveInProgressRequestLogs = useMemo(
     () =>
-      displayedRequestLogs.some((log) => {
+      sortedRequestLogs.some((log) => {
         if (!isPersistedRequestLogInProgress(log)) return false;
         return tracesByTraceId.has(log.trace_id);
       }),
-    [displayedRequestLogs, tracesByTraceId]
+    [sortedRequestLogs, tracesByTraceId]
   );
   const nowMs = useNowMs(hasLiveInProgressRequestLogs, 250);
 
@@ -629,7 +644,7 @@ export function HomeRequestLogsPanel({
           tracesByTraceId={tracesByTraceId}
           nowMs={nowMs}
           requestLogsAvailable={requestLogsAvailable}
-          requestLogs={displayedRequestLogs}
+          requestLogs={sortedRequestLogs}
           requestLogsLoading={requestLogsLoading}
           emptyStateTitle={emptyStateTitle}
           selectedLogId={selectedLogId}

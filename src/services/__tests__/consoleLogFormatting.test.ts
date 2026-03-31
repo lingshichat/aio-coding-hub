@@ -248,7 +248,7 @@ describe("services/consoleLog (formatting)", () => {
         eventType: gatewayEventNames.circuit,
       };
       const result = formatConsoleLogDetailsSmart(entry)!;
-      expect(result).toContain("熔断器事件");
+      expect(result).toContain("熔断器半开试探");
     });
 
     it("formats gateway:circuit with expired open_until", async () => {

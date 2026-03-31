@@ -219,7 +219,7 @@ impl SessionManager {
         if guard.len() >= MAX_BINDINGS {
             drop_expired(&mut guard, now_unix);
             if guard.len() >= MAX_BINDINGS {
-                guard.clear();
+                evict_oldest_quarter(&mut guard);
             }
         }
 
@@ -288,7 +288,7 @@ impl SessionManager {
         if guard.len() >= MAX_BINDINGS {
             drop_expired(&mut guard, now_unix);
             if guard.len() >= MAX_BINDINGS {
-                guard.clear();
+                evict_oldest_quarter(&mut guard);
             }
         }
 
@@ -632,6 +632,27 @@ fn session_suffix(session_id: &str) -> String {
 
 fn drop_expired(map: &mut HashMap<SessionKey, SessionBinding>, now_unix: i64) {
     map.retain(|_, v| v.expires_at > now_unix);
+}
+
+/// Evict the oldest 25% of bindings by `expires_at` to make room for new entries.
+/// This preserves the most recently active sessions instead of clearing all bindings.
+fn evict_oldest_quarter(map: &mut HashMap<SessionKey, SessionBinding>) {
+    let count = map.len();
+    if count == 0 {
+        return;
+    }
+
+    let evict_count = (count / 4).max(1);
+
+    // Collect (key, expires_at) and sort by expires_at ascending (oldest first)
+    let mut entries: Vec<(SessionKey, i64)> =
+        map.iter().map(|(k, v)| (k.clone(), v.expires_at)).collect();
+    entries.sort_by_key(|(_, expires_at)| *expires_at);
+
+    // Remove the oldest entries
+    for (key, _) in entries.into_iter().take(evict_count) {
+        map.remove(&key);
+    }
 }
 
 #[cfg(test)]

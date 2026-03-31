@@ -8,6 +8,7 @@ import type { RequestLogRouteHop } from "../../services/requestLogs";
 import type { TraceSession } from "../../services/traceStore";
 import { Tooltip } from "../../ui/Tooltip";
 import { RouteTooltipContent } from "./RouteTooltipContent";
+
 const CLIENT_ABORT_ERROR_CODES: ReadonlySet<string> = new Set([
   GatewayErrorCodes.STREAM_ABORTED,
   GatewayErrorCodes.REQUEST_ABORTED,
@@ -170,7 +171,7 @@ export function resolveLiveTraceProvider(
   if (!best) return null;
   return {
     providerId: typeof best.provider_id === "number" ? best.provider_id : null,
-    providerName: best.provider_name!.trim(),
+    providerName: (best.provider_name ?? "").trim(),
   };
 }
 

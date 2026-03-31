@@ -9,7 +9,7 @@ use tauri::Emitter;
 use tokio::sync::oneshot;
 
 use super::codex_session_id::CodexSessionIdCache;
-use super::events::{GatewayLogEvent, GATEWAY_LOG_EVENT_NAME};
+use super::events::{GatewayLogEvent, GATEWAY_LOG_EVENT_NAME, GATEWAY_STATUS_EVENT_NAME};
 use super::listen;
 use super::proxy::{GatewayErrorCode, ProviderBaseUrlPingCache, RecentErrorCache};
 use super::routes::build_router;
@@ -242,6 +242,8 @@ impl GatewayManager {
         let recent_errors = Arc::new(Mutex::new(RecentErrorCache::default()));
         let latency_cache = Arc::new(Mutex::new(ProviderBaseUrlPingCache::default()));
 
+        let state_app = app.clone();
+
         let state = GatewayAppState {
             app: app.clone(),
             db: db.clone(),
@@ -294,7 +296,9 @@ impl GatewayManager {
             oauth_refresh_task,
         });
 
-        Ok(self.status())
+        let status = self.status();
+        let _ = state_app.emit(GATEWAY_STATUS_EVENT_NAME, &status);
+        Ok(status)
     }
 
     pub fn circuit_status(
@@ -345,8 +349,8 @@ impl GatewayManager {
                     if expired {
                         return GatewayProviderCircuitStatus {
                             provider_id,
-                            state: circuit_breaker::CircuitState::Closed.as_str().to_string(),
-                            failure_count: 0,
+                            state: circuit_breaker::CircuitState::HalfOpen.as_str().to_string(),
+                            failure_count: item.failure_count,
                             failure_threshold,
                             open_until: None,
                             cooldown_until: None,

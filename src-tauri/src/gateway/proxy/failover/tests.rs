@@ -112,10 +112,24 @@ fn select_next_provider_id_handles_empty_order() {
 }
 
 #[test]
-fn retry_backoff_delay_returns_none_for_non_retryable_status() {
+fn retry_backoff_delay_returns_none_for_non_retryable_4xx_status() {
     assert!(retry_backoff_delay(reqwest::StatusCode::BAD_REQUEST, 1).is_none());
     assert!(retry_backoff_delay(reqwest::StatusCode::UNAUTHORIZED, 1).is_none());
-    assert!(retry_backoff_delay(reqwest::StatusCode::INTERNAL_SERVER_ERROR, 1).is_none());
+}
+
+#[test]
+fn retry_backoff_delay_returns_brief_pause_for_5xx() {
+    let delay = retry_backoff_delay(reqwest::StatusCode::INTERNAL_SERVER_ERROR, 1);
+    assert!(delay.is_some());
+    assert_eq!(delay.unwrap().as_millis(), 100);
+
+    let delay = retry_backoff_delay(reqwest::StatusCode::BAD_GATEWAY, 1);
+    assert!(delay.is_some());
+    assert_eq!(delay.unwrap().as_millis(), 100);
+
+    let delay = retry_backoff_delay(reqwest::StatusCode::SERVICE_UNAVAILABLE, 1);
+    assert!(delay.is_some());
+    assert_eq!(delay.unwrap().as_millis(), 100);
 }
 
 #[test]

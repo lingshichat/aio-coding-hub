@@ -1,12 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { appEventNames } from "../../constants/appEvents";
-import {
-  tauriIsPermissionGranted,
-  tauriListen,
-  tauriSendNotification,
-  tauriUnlisten,
-} from "../../test/mocks/tauri";
-import { setTauriRuntime } from "../../test/utils/tauriRuntime";
+import { tauriInvoke, tauriListen, tauriUnlisten } from "../../test/mocks/tauri";
 
 const logToConsoleMock = vi.hoisted(() => vi.fn());
 const getNotificationSoundEnabledMock = vi.hoisted(() => vi.fn());
@@ -23,12 +17,13 @@ vi.mock("../notificationSound", () => ({
 
 describe("services/noticeEvents", () => {
   it("listens and sends notifications when permission is granted", async () => {
-    setTauriRuntime();
     vi.resetModules();
 
     vi.mocked(tauriListen).mockResolvedValue(tauriUnlisten);
-    vi.mocked(tauriIsPermissionGranted).mockResolvedValue(true);
-    vi.mocked(tauriSendNotification).mockResolvedValue(undefined);
+    vi.mocked(tauriInvoke).mockImplementation(async (command: string) => {
+      if (command === "plugin:notification|is_permission_granted") return true;
+      return undefined;
+    });
     getNotificationSoundEnabledMock.mockReturnValue(true);
 
     const { listenNoticeEvents } = await import("../noticeEvents");
@@ -43,10 +38,8 @@ describe("services/noticeEvents", () => {
 
     await handler?.({ payload: { level: "info", title: "T", body: "B" } } as any);
     expect(playNotificationSoundMock).toHaveBeenCalledTimes(1);
-    expect(tauriSendNotification).toHaveBeenCalledWith({
-      title: "T",
-      body: "B",
-      silent: true,
+    expect(tauriInvoke).toHaveBeenCalledWith("plugin:notification|notify", {
+      options: { title: "T", body: "B" },
     });
 
     unlisten();
@@ -54,12 +47,13 @@ describe("services/noticeEvents", () => {
   });
 
   it("does not send notifications when permission is denied", async () => {
-    setTauriRuntime();
     vi.resetModules();
 
     vi.mocked(tauriListen).mockResolvedValue(tauriUnlisten);
-    vi.mocked(tauriIsPermissionGranted).mockResolvedValue(false);
-    vi.mocked(tauriSendNotification).mockResolvedValue(undefined);
+    vi.mocked(tauriInvoke).mockImplementation(async (command: string) => {
+      if (command === "plugin:notification|is_permission_granted") return false;
+      return undefined;
+    });
     getNotificationSoundEnabledMock.mockReturnValue(true);
 
     const { listenNoticeEvents } = await import("../noticeEvents");
@@ -71,16 +65,18 @@ describe("services/noticeEvents", () => {
     await handler?.({ payload: { level: "info", title: "T", body: "B" } } as any);
 
     expect(playNotificationSoundMock).not.toHaveBeenCalled();
-    expect(tauriSendNotification).not.toHaveBeenCalled();
+    expect(tauriInvoke).not.toHaveBeenCalledWith("plugin:notification|notify", expect.anything());
   });
 
   it("logs error when sendNotification throws", async () => {
-    setTauriRuntime();
     vi.resetModules();
 
     vi.mocked(tauriListen).mockResolvedValue(tauriUnlisten);
-    vi.mocked(tauriIsPermissionGranted).mockResolvedValue(true);
-    vi.mocked(tauriSendNotification).mockRejectedValue(new Error("notification failed"));
+    vi.mocked(tauriInvoke).mockImplementation(async (command: string) => {
+      if (command === "plugin:notification|is_permission_granted") return true;
+      if (command === "plugin:notification|notify") throw new Error("notification failed");
+      return undefined;
+    });
     getNotificationSoundEnabledMock.mockReturnValue(true);
 
     const { listenNoticeEvents } = await import("../noticeEvents");

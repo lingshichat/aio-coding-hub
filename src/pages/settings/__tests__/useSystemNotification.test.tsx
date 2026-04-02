@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { toast } from "sonner";
 import { logToConsole } from "../../../services/consoleLog";
 import { noticeSend } from "../../../services/notice";
+import { tauriInvoke } from "../../../test/mocks/tauri";
 
 vi.mock("sonner", () => ({ toast: vi.fn() }));
 vi.mock("../../../services/consoleLog", () => ({ logToConsole: vi.fn() }));
@@ -13,21 +14,28 @@ vi.mock("../../../services/notice", async () => {
   return { ...actual, noticeSend: vi.fn() };
 });
 
-async function importFreshHook(plugin: {
-  isPermissionGranted: () => Promise<boolean>;
-  requestPermission: () => Promise<string>;
+function mockInvoke(overrides: {
+  isPermissionGranted?: boolean | Error;
+  requestPermission?: string;
 }) {
-  vi.resetModules();
-  vi.doMock("@tauri-apps/plugin-notification", () => plugin);
-  return await import("../useSystemNotification");
+  vi.mocked(tauriInvoke).mockImplementation(async (command: string) => {
+    if (command === "plugin:notification|is_permission_granted") {
+      if (overrides.isPermissionGranted instanceof Error) throw overrides.isPermissionGranted;
+      return overrides.isPermissionGranted ?? false;
+    }
+    if (command === "plugin:notification|request_permission") {
+      return overrides.requestPermission ?? "denied";
+    }
+    return undefined;
+  });
 }
 
 describe("pages/settings/useSystemNotification", () => {
   it("loads permission status on mount and requests permission", async () => {
-    const { useSystemNotification } = await importFreshHook({
-      isPermissionGranted: async () => false,
-      requestPermission: async () => "granted",
-    });
+    vi.resetModules();
+    mockInvoke({ isPermissionGranted: false, requestPermission: "granted" });
+
+    const { useSystemNotification } = await import("../useSystemNotification");
 
     const { result } = renderHook(() => useSystemNotification());
     await waitFor(() => expect(result.current.noticePermissionStatus).toBe("not_granted"));
@@ -40,12 +48,10 @@ describe("pages/settings/useSystemNotification", () => {
   });
 
   it("handles permission check failures", async () => {
-    const { useSystemNotification } = await importFreshHook({
-      isPermissionGranted: async () => {
-        throw new Error("nope");
-      },
-      requestPermission: async () => "denied",
-    });
+    vi.resetModules();
+    mockInvoke({ isPermissionGranted: new Error("nope") });
+
+    const { useSystemNotification } = await import("../useSystemNotification");
 
     const { result } = renderHook(() => useSystemNotification());
     await waitFor(() => expect(result.current.noticePermissionStatus).toBe("unknown"));
@@ -55,30 +61,25 @@ describe("pages/settings/useSystemNotification", () => {
   });
 
   it("toasts when sending test without permission", async () => {
-    // Not granted -> toast and return early.
-    vi.doMock("@tauri-apps/plugin-notification", () => ({
-      isPermissionGranted: async () => false,
-      requestPermission: async () => "denied",
-    }));
-
     vi.resetModules();
-    const fresh = await import("../useSystemNotification");
-    const { result: result2 } = renderHook(() => fresh.useSystemNotification());
-    await waitFor(() => expect(result2.current.noticePermissionStatus).toBe("not_granted"));
+    mockInvoke({ isPermissionGranted: false });
+
+    const { useSystemNotification } = await import("../useSystemNotification");
+    const { result } = renderHook(() => useSystemNotification());
+    await waitFor(() => expect(result.current.noticePermissionStatus).toBe("not_granted"));
 
     await act(async () => {
-      await result2.current.sendSystemNotificationTest();
+      await result.current.sendSystemNotificationTest();
     });
     expect(toast).toHaveBeenCalledWith("请先在「系统通知」中授权通知权限");
   });
 
   it("toasts when notice_send unavailable and when sending succeeds", async () => {
     vi.mocked(noticeSend).mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    vi.resetModules();
+    mockInvoke({ isPermissionGranted: true });
 
-    const { useSystemNotification } = await importFreshHook({
-      isPermissionGranted: async () => true,
-      requestPermission: async () => "granted",
-    });
+    const { useSystemNotification } = await import("../useSystemNotification");
 
     const { result } = renderHook(() => useSystemNotification());
     await waitFor(() => expect(result.current.noticePermissionStatus).toBe("granted"));

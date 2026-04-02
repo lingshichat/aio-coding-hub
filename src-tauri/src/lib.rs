@@ -26,6 +26,7 @@ use commands::*;
 use shared::mutex_ext::MutexExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tauri::Manager;
+use tauri_plugin_dialog::DialogExt;
 
 static EXIT_CLEANUP_SPAWNED: AtomicBool = AtomicBool::new(false);
 
@@ -57,6 +58,20 @@ pub fn run() {
         .on_window_event(resident::on_window_event)
         .setup(|app| {
             crate::app::logging::init(app.handle());
+
+            // Check for restart storm before installing the watchdog.
+            // If the previous run wrote a restart marker less than RESTART_STORM_WINDOW ago,
+            // show a native dialog and skip auto-recovery to break the cycle.
+            if crate::app::heartbeat_watchdog::check_and_clear_restart_marker(app.handle()) {
+                tracing::error!("startup: restart storm detected, auto-recovery disabled for this session");
+                app.dialog().message(
+                    "AIO Coding Hub 检测到 WebView 反复崩溃，已停止自动恢复。\n\n\
+                     如果问题持续出现，请检查系统 WebView2 运行时是否正常。"
+                ).title("WebView 恢复失败").blocking_show();
+                // Still install the watchdog but it will not have a broken marker,
+                // so normal page-level recovery will work if the WebView stabilizes.
+            }
+
             crate::app::heartbeat_watchdog::install(app.handle());
 
             // Global panic hook: ensure any panic is written to disk logs for post-mortem diagnosis.

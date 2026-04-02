@@ -17,6 +17,7 @@ export default defineConfig({
     testTimeout: 15000,
     setupFiles: ["src/test/setup.ts"],
     restoreMocks: true,
+    exclude: ["**/node_modules/**", ".codex-temp/**"],
     coverage: {
       provider: "v8",
       reporter: ["text", "lcov"],

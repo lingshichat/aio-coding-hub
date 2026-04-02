@@ -14,6 +14,11 @@ import { Card } from "../../ui/Card";
 import { Dialog } from "../../ui/Dialog";
 import { cn } from "../../utils/cn";
 import {
+  GatewayErrorDescriptions,
+  getGatewayErrorShortLabel,
+  type GatewayErrorDescription,
+} from "../../constants/gatewayErrorCodes";
+import {
   computeOutputTokensPerSecond,
   formatDurationMs,
   formatTokensPerSecond,
@@ -92,6 +97,9 @@ export function RequestLogDetailDialog({
       selectedLog.duration_ms != null ||
       selectedLog.ttfb_ms != null ||
       (isInProgress && liveTrace != null));
+
+  const errorDetails = selectedLog ? parseErrorDetailsJson(selectedLog.error_details_json) : null;
+
   return (
     <Dialog
       open={selectedLogId != null}
@@ -191,6 +199,68 @@ export function RequestLogDetailDialog({
             </Card>
           ) : null}
 
+          {errorDetails ? (
+            <Card padding="sm">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm font-semibold text-slate-900 dark:text-slate-100">
+                    错误详情
+                  </div>
+                  <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
+                    供应商返回的具体错误信息。
+                  </div>
+                </div>
+                {errorDetails.upstreamStatus != null ? (
+                  <span className="rounded-full bg-rose-50 px-2.5 py-1 text-xs font-medium text-rose-600 ring-1 ring-inset ring-rose-500/10 dark:bg-rose-500/15 dark:text-rose-400 dark:ring-rose-400/20">
+                    上游 {errorDetails.upstreamStatus}
+                  </span>
+                ) : null}
+              </div>
+
+              <div className="mt-3 rounded-lg border border-rose-200/60 bg-rose-50/50 p-3 dark:border-rose-500/20 dark:bg-rose-950/20">
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs">
+                    <span className="font-medium text-slate-600 dark:text-slate-400">错误码</span>
+                    <code className="rounded bg-rose-100 px-1.5 py-0.5 font-mono text-rose-700 dark:bg-rose-900/40 dark:text-rose-300">
+                      {errorDetails.errorCode}
+                    </code>
+                    <span className="text-slate-500 dark:text-slate-400">
+                      ({getGatewayErrorShortLabel(errorDetails.errorCode)})
+                    </span>
+                  </div>
+                  {errorDetails.errorCategory ? (
+                    <div className="flex items-center gap-2 text-xs">
+                      <span className="font-medium text-slate-600 dark:text-slate-400">
+                        错误分类
+                      </span>
+                      <span className="text-slate-700 dark:text-slate-300">
+                        {errorDetails.errorCategory}
+                      </span>
+                    </div>
+                  ) : null}
+                  {errorDetails.reason ? (
+                    <div className="text-xs">
+                      <span className="font-medium text-slate-600 dark:text-slate-400">原因</span>
+                      <p className="mt-1 font-mono text-rose-800 dark:text-rose-200 leading-relaxed break-all">
+                        {errorDetails.reason}
+                      </p>
+                    </div>
+                  ) : null}
+                  {errorDetails.gwDescription ? (
+                    <div className="mt-2 space-y-1 border-t border-rose-200/40 pt-2 dark:border-rose-500/10">
+                      <p className="text-xs text-slate-600 dark:text-slate-400">
+                        {errorDetails.gwDescription.desc}
+                      </p>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        💡 {errorDetails.gwDescription.suggestion}
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+            </Card>
+          ) : null}
+
           <Card padding="sm">
             <div className="flex flex-wrap items-start justify-between gap-3">
               <div>
@@ -242,6 +312,33 @@ function MetricCard({
       </div>
     </div>
   );
+}
+
+type ParsedErrorDetails = {
+  errorCode: string;
+  errorCategory: string | null;
+  upstreamStatus: number | null;
+  reason: string | null;
+  gwDescription: GatewayErrorDescription | null;
+};
+
+function parseErrorDetailsJson(json: string | null | undefined): ParsedErrorDetails | null {
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const errorCode = typeof parsed.error_code === "string" ? parsed.error_code : null;
+    if (!errorCode) return null;
+    return {
+      errorCode,
+      errorCategory: typeof parsed.error_category === "string" ? parsed.error_category : null,
+      upstreamStatus: typeof parsed.upstream_status === "number" ? parsed.upstream_status : null,
+      reason: typeof parsed.reason === "string" ? parsed.reason : null,
+      gwDescription:
+        GatewayErrorDescriptions[errorCode as keyof typeof GatewayErrorDescriptions] ?? null,
+    };
+  } catch {
+    return null;
+  }
 }
 
 function resolveCacheWriteValue(selectedLog: RequestLogDetail) {

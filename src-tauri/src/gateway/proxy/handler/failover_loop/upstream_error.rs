@@ -218,12 +218,16 @@ pub(super) async fn handle_non_success_response(
     let mut abort_response_headers: Option<axum::http::HeaderMap> = None;
     let mut matched_rule_id: Option<&'static str> = None;
     let mut matched_429_concurrency_limit = false;
-    if !is_count_tokens
+    // Body preview for 5xx errors (used in reason field for diagnostics).
+    let mut upstream_body_preview: Option<String> = None;
+    let need_client_error_scan = !is_count_tokens
         && (upstream_client_error_rules::should_attempt_non_retryable_match(
             status,
             resp.as_ref().and_then(|r| r.content_length()),
-        ) || status.as_u16() == 429)
-    {
+        ) || status.as_u16() == 429);
+    let need_5xx_body_preview =
+        !is_count_tokens && status.is_server_error() && !need_client_error_scan;
+    if need_client_error_scan || need_5xx_body_preview {
         if let Some(r) = resp.take() {
             let read_result = if r.content_length().is_none() {
                 read_response_body_with_optional_limit(
@@ -258,20 +262,34 @@ pub(super) async fn handle_non_success_response(
                         ),
                     );
                 }
-                if status.as_u16() == 429 {
-                    matched_429_concurrency_limit =
-                        upstream_client_error_rules::match_429_concurrency_limit(
-                            body_for_scan.as_ref(),
-                        );
+                // Extract body preview for 5xx errors (for diagnostics in reason field).
+                if status.is_server_error() {
+                    let preview = String::from_utf8_lossy(&body_for_scan);
+                    let truncated: String = preview.chars().take(500).collect();
+                    if !truncated.is_empty() {
+                        upstream_body_preview = Some(truncated);
+                    }
                 }
-                matched_rule_id = upstream_client_error_rules::match_non_retryable_client_error(
-                    ctx.cli_key.as_str(),
-                    status,
-                    body_for_scan.as_ref(),
-                );
-                if matched_rule_id.is_some() || matched_429_concurrency_limit {
-                    category = ErrorCategory::NonRetryableClientError;
-                    decision = FailoverDecision::Abort;
+                if need_client_error_scan {
+                    if status.as_u16() == 429 {
+                        matched_429_concurrency_limit =
+                            upstream_client_error_rules::match_429_concurrency_limit(
+                                body_for_scan.as_ref(),
+                            );
+                    }
+                    matched_rule_id = upstream_client_error_rules::match_non_retryable_client_error(
+                        ctx.cli_key.as_str(),
+                        status,
+                        body_for_scan.as_ref(),
+                    );
+                    if matched_rule_id.is_some() || matched_429_concurrency_limit {
+                        category = ErrorCategory::NonRetryableClientError;
+                        decision = FailoverDecision::Abort;
+                    }
+                }
+                // Preserve consumed body/headers so downstream (e.g. Abort
+                // pass-through) can still use them after resp.take().
+                if abort_body_bytes.is_none() {
                     abort_body_bytes = Some(body_for_scan);
                     abort_response_headers = Some(headers_for_scan);
                 }
@@ -327,9 +345,13 @@ pub(super) async fn handle_non_success_response(
     let reason = if matched_429_concurrency_limit {
         format!("status={} rule=429_concurrency_limit", status.as_u16())
     } else {
-        match matched_rule_id {
+        let base = match matched_rule_id {
             Some(rule_id) => format!("status={} rule={rule_id}", status.as_u16()),
             None => format!("status={}", status.as_u16()),
+        };
+        match upstream_body_preview {
+            Some(ref preview) => format!("{base}, upstream_body={preview}"),
+            None => base,
         }
     };
     let outcome = format!(

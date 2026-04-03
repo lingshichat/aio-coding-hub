@@ -44,16 +44,6 @@ const REBUILD_COOLDOWN: Duration = Duration::from_secs(120);
 pub(crate) const RESTART_STORM_WINDOW: Duration = Duration::from_secs(30);
 const RESTART_MARKER_FILENAME: &str = "restart_marker";
 
-/// Maximum number of window rebuild attempts within `REBUILD_COOLDOWN` before
-/// escalating to a full app restart.
-const REBUILD_MAX_ATTEMPTS: u32 = 3;
-const REBUILD_COOLDOWN: Duration = Duration::from_secs(120);
-
-/// If a restart marker file is younger than this duration at startup, we consider
-/// the app to be in a restart storm and refuse to auto-recover.
-pub(crate) const RESTART_STORM_WINDOW: Duration = Duration::from_secs(30);
-const RESTART_MARKER_FILENAME: &str = "restart_marker";
-
 #[derive(Debug, Clone, Copy, Serialize)]
 struct HeartbeatPayload {
     ts_unix_ms: u64,

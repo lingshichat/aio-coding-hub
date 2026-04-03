@@ -43,12 +43,8 @@ jobs:
       - name: Install deps
         run: pnpm install --frozen-lockfile
 
-      - name: Build frontend
-        run: pnpm build
-
-      - name: Build Tauri (Windows, no signing)
-        working-directory: src-tauri
-        run: cargo build --release --target x86_64-pc-windows-msvc
+      - name: Build Tauri (Windows, portable)
+        run: pnpm tauri build --target x86_64-pc-windows-msvc --bundles none
 
       - name: Package portable ZIP
         shell: pwsh

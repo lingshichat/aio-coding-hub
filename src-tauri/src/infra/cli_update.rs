@@ -34,9 +34,7 @@ pub struct CliUpdateResult {
 fn extract_semver(raw: &str) -> &str {
     let s = raw.trim().trim_start_matches('v');
     // Take characters until we hit a space or any char that can't be part of semver
-    let end = s
-        .find(|c: char| c == ' ' || c == '(' || c == ')')
-        .unwrap_or(s.len());
+    let end = s.find([' ', '(', ')']).unwrap_or(s.len());
     s[..end].trim_end_matches(|c: char| !c.is_ascii_alphanumeric())
 }
 

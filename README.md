@@ -220,10 +220,12 @@ curl http://127.0.0.1:37123/health
 ```bash
 pnpm check:precommit       # 快速预提交检查（前端 + Rust check）
 pnpm check:precommit:full  # 完整检查（格式 + clippy）
-pnpm check:prepush         # 覆盖率 + 后端测试 + clippy
+pnpm check:prepush         # 手动全量检查（覆盖率 + 后端测试 + clippy）
 pnpm test:unit              # 前端单元测试
 pnpm tauri:test             # 后端测试
 ```
+
+说明：当前仓库的 `git push` 不会自动运行阻塞式本地 `pre-push` 预检，推送校验以 GitHub Actions 为准；如果你想在本地先跑一遍等价的全量检查，再手动执行 `pnpm check:prepush`。
 
 ---
 

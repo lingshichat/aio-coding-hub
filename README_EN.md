@@ -222,10 +222,12 @@ curl http://127.0.0.1:37123/health
 ```bash
 pnpm check:precommit       # Quick pre-commit (frontend + Rust check)
 pnpm check:precommit:full  # Full check (formatting + clippy)
-pnpm check:prepush         # Coverage + backend tests + clippy
+pnpm check:prepush         # Manual full validation (coverage + backend tests + clippy)
 pnpm test:unit              # Frontend unit tests
 pnpm tauri:test             # Backend tests
 ```
+
+Note: `git push` in this repository does not run a blocking local `pre-push` validation step. GitHub Actions is the source of truth for push-time validation; run `pnpm check:prepush` manually when you want the same full suite locally.
 
 ---
 

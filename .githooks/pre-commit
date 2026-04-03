@@ -82,7 +82,7 @@ fi
 if [ "$has_tauri_changes" = true ]; then
   echo "[pre-commit] Running Rust fast checks..."
   # 中文说明：当 src-tauri/Cargo.toml 发生变更但 Cargo.lock 未同步更新时，
-  # cargo --locked 会直接失败，问题常常被拖到 pre-push 才暴露。
+  # cargo --locked 会直接失败，问题常常要到手动全量检查或 CI 才暴露。
   # 这里在检测到典型报错后自动更新 Cargo.lock 并重新校验，减少反复踩坑。
   tauri_log="$(mktemp -t aio-precommit-tauri.XXXXXX)"
   if pnpm run check:precommit:tauri 2>&1 | tee "$tauri_log"; then

@@ -53,4 +53,4 @@ try {
 console.log("Git hooks installed:");
 console.log("- core.hooksPath = .githooks");
 console.log("- .githooks/pre-commit is executable");
-console.log("- .githooks/pre-push is executable");
+console.log("- .githooks/pre-push is executable (no-op; push validation runs in GitHub Actions)");

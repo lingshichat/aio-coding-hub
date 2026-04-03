@@ -9,5 +9,6 @@ cd "$repo_root"
 # tests accidentally execute ref names as commands.
 exec </dev/null
 
-echo "[pre-push] Running full pre-push checks (coverage + tauri test + clippy)..."
-pnpm run check:prepush
+echo "[pre-push] Skipping local push-time checks for this repository."
+echo "[pre-push] GitHub Actions is the source of truth for push validation."
+echo "[pre-push] Run 'pnpm run check:prepush' manually when you want the full suite locally."

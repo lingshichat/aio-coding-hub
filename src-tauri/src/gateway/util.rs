@@ -409,10 +409,6 @@ pub(super) fn inject_provider_auth(cli_key: &str, api_key: &str, headers: &mut H
             }
         }
         "claude" => {
-            let value = format!("Bearer {api_key}");
-            if let Ok(header_value) = HeaderValue::from_str(&value) {
-                headers.insert(header::AUTHORIZATION, header_value);
-            }
             if let Ok(header_value) = HeaderValue::from_str(api_key) {
                 headers.insert("x-api-key", header_value);
             }
@@ -463,7 +459,10 @@ pub(super) fn ensure_cli_required_headers(cli_key: &str, headers: &mut HeaderMap
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_request_fingerprint, normalize_query_for_fingerprint};
+    use super::{
+        compute_request_fingerprint, inject_provider_auth, normalize_query_for_fingerprint,
+    };
+    use axum::http::{header, HeaderMap};
 
     #[test]
     fn normalize_query_sorts_unique_key_pairs() {
@@ -579,5 +578,28 @@ mod tests {
         );
 
         assert_ne!(left, right);
+    }
+
+    #[test]
+    fn inject_provider_auth_claude_uses_x_api_key_only() {
+        let mut headers = HeaderMap::new();
+        inject_provider_auth("claude", "sk-ant-test", &mut headers);
+
+        assert!(headers.contains_key("x-api-key"));
+        assert!(headers.contains_key("anthropic-version"));
+        assert!(!headers.contains_key(header::AUTHORIZATION));
+    }
+
+    #[test]
+    fn inject_provider_auth_codex_uses_authorization_bearer() {
+        let mut headers = HeaderMap::new();
+        inject_provider_auth("codex", "sk-openai-test", &mut headers);
+
+        assert!(headers
+            .get(header::AUTHORIZATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .starts_with("Bearer "));
+        assert!(!headers.contains_key("x-api-key"));
     }
 }

@@ -77,6 +77,7 @@ use crate::gateway::util::{
     body_for_introspection, build_target_url, ensure_cli_required_headers, inject_provider_auth,
     now_unix_seconds, strip_hop_headers,
 };
+use crate::shared::mutex_ext::MutexExt;
 
 use context::{
     build_stream_finalize_ctx, AttemptCtx, CommonCtx, CommonCtxArgs, CommonCtxOwned, LoopControl,
@@ -850,6 +851,11 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
             );
         }
 
+        // Claude API key providers: some relays only accept one auth scheme.
+        // We default to Anthropic-style `x-api-key`, and fallback to
+        // `Authorization: Bearer` once on 401/403.
+        let mut claude_api_key_bearer_fallback = false;
+
         for retry_index in 1..=provider_max_attempts {
             let attempt_index = attempts.len().saturating_add(1) as u32;
             let attempt_started_ms = started.elapsed().as_millis();
@@ -1071,6 +1077,29 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
                     &input.cli_key
                 };
                 inject_provider_auth(auth_cli_key, effective_credential.trim(), &mut headers);
+
+                if !cx2cc_active && auth_cli_key == "claude" {
+                    if claude_api_key_bearer_fallback {
+                        // Bearer-only fallback for strict relays.
+                        let value = format!("Bearer {}", effective_credential.trim());
+                        if let Ok(header_value) = HeaderValue::from_str(&value) {
+                            headers.remove("x-api-key");
+                            headers.insert(header::AUTHORIZATION, header_value);
+                        }
+                    }
+
+                    if retry_index == 1 || claude_api_key_bearer_fallback {
+                        let mut settings = ctx.special_settings.lock_or_recover();
+                        settings.push(serde_json::json!({
+                            "type": "claude_auth_injection",
+                            "scope": "attempt",
+                            "providerId": provider_id,
+                            "providerName": provider_name_base.clone(),
+                            "retryAttemptNumber": retry_index,
+                            "mode": if claude_api_key_bearer_fallback { "authorization_bearer" } else { "x_api_key" },
+                        }));
+                    }
+                }
             }
             if use_codex_chatgpt_backend {
                 maybe_inject_codex_chatgpt_headers(
@@ -1218,6 +1247,31 @@ pub(super) async fn run(mut input: RequestContext) -> Response {
                             LoopControl::BreakRetry => break,
                             LoopControl::Return(resp) => return resp,
                         }
+                    }
+
+                    // Claude API key auth scheme fallback:
+                    // Some relay services only accept `Authorization: Bearer`, not `x-api-key`.
+                    if input.cli_key == "claude"
+                        && provider.auth_mode != "oauth"
+                        && !cx2cc_active
+                        && !claude_api_key_bearer_fallback
+                        && retry_index < provider_max_attempts
+                        && matches!(status.as_u16(), 401 | 403)
+                    {
+                        claude_api_key_bearer_fallback = true;
+                        let mut settings = ctx.special_settings.lock_or_recover();
+                        settings.push(serde_json::json!({
+                            "type": "claude_auth_injection",
+                            "scope": "attempt",
+                            "hit": true,
+                            "action": "fallback_to_authorization_bearer",
+                            "providerId": provider_id,
+                            "providerName": provider_name_base.clone(),
+                            "status": status.as_u16(),
+                            "retryAttemptNumber": retry_index,
+                            "retryAttemptNumberNext": retry_index + 1,
+                        }));
+                        continue;
                     }
 
                     // OAuth 401 reactive refresh: if we get a 401 on an OAuth provider,

@@ -78,6 +78,7 @@ export type RequestLogDetail = {
   final_provider_source_id?: number | null;
   final_provider_source_name?: string | null;
   cost_usd: number | null;
+  error_details_json?: string | null;
   cost_multiplier: number;
   created_at_ms: number | null;
   created_at: number;

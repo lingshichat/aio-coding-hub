@@ -292,6 +292,13 @@ After implementation:
       flags) are still owned centrally instead of drifting across layers
 - [ ] Classified helper/probe routes as user-visible vs infra-only and verified
       logs, events, stats, and provider-health side effects match that choice
+- [ ] If the change touches gateway/proxy paths, explicitly list all non-passthrough
+      mutations (headers, path/query, body JSON, response translation) and ensure each
+      mutation is either:
+      - guarded + observable (`special_settings_json`), or
+      - removed as unnecessary
+- [ ] Confirm that provider auth/bridge modes do not silently affect each other
+      (e.g. API key vs OAuth vs protocol bridge should have clear boundaries)
 - [ ] Reviewed root bootstrap / command registry blast radius after the change
 
 ---

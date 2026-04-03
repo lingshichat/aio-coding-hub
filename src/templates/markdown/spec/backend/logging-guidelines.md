@@ -35,6 +35,8 @@ without leaking secrets.
 - Startup and shutdown state transitions
 - OAuth / opener failures
 - Gateway circuit and routing transitions
+- Gateway request/response transformations that change semantics should be recorded in `special_settings_json`
+  (example marker: `claude_auth_injection`)
 - Explicit cleanup failures that could leave drift or stale files behind
 
 ---

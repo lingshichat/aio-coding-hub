@@ -117,7 +117,7 @@ jobs:
 
       - name: Rust test
         working-directory: src-tauri
-        run: cargo test --locked
+        run: cargo test --locked -- --test-threads=1
 
       - name: Install cargo-audit
         run: cargo install cargo-audit --locked

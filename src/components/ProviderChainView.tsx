@@ -405,6 +405,14 @@ export function ProviderChainView({
                         {reasonText}
                       </div>
 
+                      {attempt.reason ? (
+                        <div className="mt-2 rounded-lg border border-rose-200/60 bg-rose-50/50 px-3 py-2 dark:border-rose-500/20 dark:bg-rose-950/20">
+                          <pre className="whitespace-pre-wrap break-all text-xs font-mono text-rose-800 dark:text-rose-200 leading-relaxed">
+                            {attempt.reason}
+                          </pre>
+                        </div>
+                      ) : null}
+
                       <div className="mt-3 flex flex-wrap items-center gap-2 text-xs text-slate-500 dark:text-slate-400">
                         {attempt.status != null ? (
                           <span className="rounded-full bg-slate-100 dark:bg-slate-700 px-2.5 py-1">
@@ -429,6 +437,23 @@ export function ProviderChainView({
                         {attempt.error_code ? (
                           <span className="rounded-full bg-amber-50 dark:bg-amber-900/30 px-2.5 py-1 font-medium text-amber-700 dark:text-amber-400">
                             {getErrorCodeLabel(attempt.error_code)}
+                          </span>
+                        ) : null}
+                        {attempt.circuit_state_after ? (
+                          <span
+                            className={cn(
+                              "rounded-full px-2.5 py-1 font-medium",
+                              attempt.circuit_state_after === "open"
+                                ? "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
+                                : attempt.circuit_state_after === "half_open"
+                                  ? "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                                  : "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                            )}
+                          >
+                            {attempt.circuit_failure_count != null &&
+                            attempt.circuit_failure_threshold != null
+                              ? `${attempt.circuit_state_after} ${attempt.circuit_failure_count}/${attempt.circuit_failure_threshold}`
+                              : attempt.circuit_state_after}
                           </span>
                         ) : null}
                       </div>

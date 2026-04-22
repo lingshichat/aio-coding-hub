@@ -26,11 +26,21 @@ jobs:
           git remote add upstream https://github.com/dyndynjyxa/aio-coding-hub.git
           git fetch upstream
 
-      - name: Sync main branch
+      - name: Sync main branch (fast-forward only)
         run: |
           git checkout main
-          git merge upstream/main --no-edit
+          git merge --ff-only upstream/main
           git push origin main
+
+      - name: Sync fork-base branch (rebase on upstream)
+        run: |
+          git checkout fork-base
+          git rebase upstream/main || {
+            echo "Rebase failed. Manual intervention needed for fork-base."
+            git rebase --abort
+            exit 1
+          }
+          git push --force-with-lease origin fork-base
 
       - name: Sync other branches (optional)
         if: false

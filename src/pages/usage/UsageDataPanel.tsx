@@ -5,10 +5,11 @@ import type {
   UsageLeaderboardRow,
   UsagePeriod,
   UsageProviderCacheRateTrendRowV1,
+  UsageProviderMetricsTrendRowV1,
   UsageScope,
   UsageSummary,
 } from "../../services/usage/usage";
-import type { AvailabilityTimelineData } from "../../components/usage/UsageAvailabilityPanel";
+import type { AvailabilityTimelineData } from "../../components/usage/usageAvailabilityTimeline";
 import { Card } from "../../ui/Card";
 import type { UsageTableTab } from "./types";
 import { useAutoFocus, useInert } from "./useInert";
@@ -22,8 +23,10 @@ export type UsageDataPanelProps = {
   loading: boolean;
   dataLoading: boolean;
   cacheTrendLoading: boolean;
+  metricsTrendLoading: boolean;
   dataStale: boolean;
   cacheTrendStale: boolean;
+  metricsTrendStale: boolean;
   errorText: string | null;
   tableTitle: string;
   summary: UsageSummary | null;
@@ -31,6 +34,8 @@ export type UsageDataPanelProps = {
   totalCostUsd: number;
   cacheTrendRows: UsageProviderCacheRateTrendRowV1[];
   cacheTrendProviderCount: number;
+  metricsTrendRows: UsageProviderMetricsTrendRowV1[];
+  metricsTrendProviderCount: number;
   providerSelectValue: string;
   providerOptions: readonly { id: number; label: string }[];
   onProviderIdChange: (providerId: number | null) => void;
@@ -50,14 +55,23 @@ function overlayOpenForCustomPending({
   rows,
   summary,
   cacheTrendRows,
+  metricsTrendRows,
   availabilityData,
 }: Pick<
   UsageDataPanelProps,
-  "customPending" | "tableTab" | "rows" | "summary" | "cacheTrendRows" | "availabilityData"
+  | "customPending"
+  | "tableTab"
+  | "rows"
+  | "summary"
+  | "cacheTrendRows"
+  | "metricsTrendRows"
+  | "availabilityData"
 >) {
   if (!customPending) return false;
   if (tableTab === "cacheTrend") return cacheTrendRows.length > 0;
-  if (tableTab === "availability") return availabilityData != null && availabilityData.providers.length > 0;
+  if (tableTab === "metricsTrend") return metricsTrendRows.length > 0;
+  if (tableTab === "availability")
+    return availabilityData != null && availabilityData.providers.length > 0;
   return rows.length > 0 || summary != null;
 }
 
@@ -66,27 +80,24 @@ function CustomPendingOverlay({
   overlayRef,
 }: {
   open: boolean;
-  overlayRef: RefObject<HTMLDivElement | null>;
+  overlayRef: RefObject<HTMLOutputElement | null>;
 }) {
   if (!open) return null;
 
   return (
-    <div
+    <output
       ref={overlayRef}
       tabIndex={-1}
-      role="status"
       aria-live="polite"
-      className="absolute inset-0 z-20 flex items-center justify-center rounded-lg bg-white/60 dark:bg-slate-900/60 backdrop-blur-[1px]"
+      className="absolute inset-0 z-20 flex items-center justify-center rounded-lg bg-white/60 dark:bg-card/60 backdrop-blur-[1px]"
     >
-      <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-6 py-4 text-center shadow-lg">
-        <div className="text-sm font-medium text-slate-700 dark:text-slate-300">
+      <div className="rounded-lg border border-border bg-white dark:bg-secondary px-6 py-4 text-center shadow-lg">
+        <div className="text-sm font-medium text-secondary-foreground">
           请选择日期后点击"应用"查看数据
         </div>
-        <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">
-          当前显示为上一次查询的缓存数据
-        </div>
+        <div className="mt-1 text-xs text-muted-foreground">当前显示为上一次查询的缓存数据</div>
       </div>
-    </div>
+    </output>
   );
 }
 
@@ -97,17 +108,20 @@ export function UsageDataPanel(props: UsageDataPanelProps) {
     rows: props.rows,
     summary: props.summary,
     cacheTrendRows: props.cacheTrendRows,
+    metricsTrendRows: props.metricsTrendRows,
     availabilityData: props.availabilityData,
   });
   const activeStale =
     props.tableTab === "cacheTrend"
       ? props.cacheTrendStale
-      : props.tableTab === "availability"
-        ? props.availabilityRefreshing
-        : props.dataStale;
+      : props.tableTab === "metricsTrend"
+        ? props.metricsTrendStale
+        : props.tableTab === "availability"
+          ? props.availabilityRefreshing
+          : props.dataStale;
 
   const contentRef = useRef<HTMLDivElement | null>(null);
-  const overlayRef = useRef<HTMLDivElement | null>(null);
+  const overlayRef = useRef<HTMLOutputElement | null>(null);
   useInert(contentRef, overlayOpen);
   useAutoFocus(overlayRef, overlayOpen);
 

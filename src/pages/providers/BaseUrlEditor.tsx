@@ -74,9 +74,7 @@ async function pingAllBaseUrlRows(
   if (rowsSnapshot.length === 0) return;
   setPingingAll(true);
   try {
-    for (const row of rowsSnapshot) {
-      await pingBaseUrlRow(row.id, row.url, setRows);
-    }
+    await Promise.all(rowsSnapshot.map((row) => pingBaseUrlRow(row.id, row.url, setRows)));
   } finally {
     setPingingAll(false);
   }
@@ -101,7 +99,7 @@ export function BaseUrlEditor({
         const pinging = row.ping.status === "pinging";
         const pingBadge =
           row.ping.status === "pinging" ? (
-            <span className="text-xs text-slate-400">…</span>
+            <span className="text-xs text-muted-foreground">…</span>
           ) : row.ping.status === "ok" ? (
             <span className="font-mono text-xs text-emerald-600">{row.ping.ms}ms</span>
           ) : row.ping.status === "error" ? (

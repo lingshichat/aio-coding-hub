@@ -5,6 +5,7 @@ import { toast } from "sonner";
 import {
   type ClaudeSettingsPatch,
   type CodexConfigPatch,
+  type CodexConfigState,
   type GeminiConfigPatch,
 } from "../../services/cli/cliManager";
 import { logToConsole } from "../../services/consoleLog";
@@ -31,27 +32,35 @@ import {
   useCliManagerCodexConfigTomlQuery,
   useCliManagerCodexConfigTomlSetMutation,
   useCliManagerCodexInfoQuery,
+  useCliManagerCodexModelCatalogQuery,
+  useCliManagerCodexModelCatalogRefresh,
   useCliManagerGeminiConfigQuery,
   useCliManagerGeminiConfigSetMutation,
   useCliManagerGeminiInfoQuery,
 } from "../../query/cliManager";
 import { formatActionFailureToast } from "../../utils/errors";
+import { useGrokTabDataModel } from "../../components/cli-manager/tabs/useGrokTabDataModel";
 
-export type CliManagerTabKey = "general" | "claude" | "codex" | "cx2cc" | "gemini";
+export type CliManagerTabKey = "general" | "claude" | "codex" | "cx2cc" | "gemini" | "grok";
 
 export const CLI_MANAGER_TABS: Array<{ key: CliManagerTabKey; label: string }> = [
   { key: "general", label: "通用" },
   { key: "claude", label: "Claude Code" },
   { key: "codex", label: "Codex" },
-  { key: "cx2cc", label: "CX2CC" },
   { key: "gemini", label: "Gemini" },
+  { key: "grok", label: "Grok" },
+  { key: "cx2cc", label: "CX2CC" },
 ];
 
 const DEFAULT_RECTIFIER: GatewayRectifierSettingsPatch = {
-  verbose_provider_error: true,
-  intercept_anthropic_warmup_requests: true,
+  verbose_provider_error: false,
+  intercept_anthropic_warmup_requests: false,
+  enable_thinking_effort_conflict_rectifier: true,
   enable_thinking_signature_rectifier: true,
   enable_thinking_budget_rectifier: true,
+  enable_gemini_function_id_rectifier: true,
+  enable_response_input_rectifier: true,
+  codex_priority_billing_source: "requested",
   enable_billing_header_rectifier: true,
   enable_claude_metadata_user_id_injection: true,
   enable_response_fixer: true,
@@ -62,8 +71,98 @@ const DEFAULT_RECTIFIER: GatewayRectifierSettingsPatch = {
   response_fixer_max_fix_size: 1024 * 1024,
 };
 
+type GeneralSettingsDraft = {
+  rectifier: GatewayRectifierSettingsPatch;
+  circuitBreakerNoticeEnabled: boolean;
+  codexSessionIdCompletionEnabled: boolean;
+  upstreamFirstByteTimeoutSeconds: number;
+  upstreamStreamIdleTimeoutSeconds: number;
+  upstreamRequestTimeoutNonStreamingSeconds: number;
+  providerCooldownSeconds: number;
+  providerBaseUrlPingCacheTtlSeconds: number;
+  circuitBreakerFailureThreshold: number;
+  circuitBreakerOpenDurationMinutes: number;
+};
+
+const DEFAULT_GENERAL_SETTINGS_DRAFT: GeneralSettingsDraft = {
+  rectifier: DEFAULT_RECTIFIER,
+  circuitBreakerNoticeEnabled: false,
+  codexSessionIdCompletionEnabled: true,
+  upstreamFirstByteTimeoutSeconds: 0,
+  upstreamStreamIdleTimeoutSeconds: 0,
+  upstreamRequestTimeoutNonStreamingSeconds: 0,
+  providerCooldownSeconds: 30,
+  providerBaseUrlPingCacheTtlSeconds: 60,
+  circuitBreakerFailureThreshold: 5,
+  circuitBreakerOpenDurationMinutes: 30,
+};
+
+function appSettingsToGeneralSettingsDraft(appSettings: AppSettings): GeneralSettingsDraft {
+  return {
+    rectifier: {
+      verbose_provider_error: appSettings.verbose_provider_error,
+      intercept_anthropic_warmup_requests: appSettings.intercept_anthropic_warmup_requests,
+      enable_thinking_effort_conflict_rectifier:
+        appSettings.enable_thinking_effort_conflict_rectifier,
+      enable_thinking_signature_rectifier: appSettings.enable_thinking_signature_rectifier,
+      enable_thinking_budget_rectifier: appSettings.enable_thinking_budget_rectifier,
+      enable_gemini_function_id_rectifier: appSettings.enable_gemini_function_id_rectifier,
+      enable_response_input_rectifier: appSettings.enable_response_input_rectifier,
+      codex_priority_billing_source: appSettings.codex_priority_billing_source,
+      enable_billing_header_rectifier: appSettings.enable_billing_header_rectifier,
+      enable_claude_metadata_user_id_injection:
+        appSettings.enable_claude_metadata_user_id_injection,
+      enable_response_fixer: appSettings.enable_response_fixer,
+      response_fixer_fix_encoding: appSettings.response_fixer_fix_encoding,
+      response_fixer_fix_sse_format: appSettings.response_fixer_fix_sse_format,
+      response_fixer_fix_truncated_json: appSettings.response_fixer_fix_truncated_json,
+      response_fixer_max_json_depth: appSettings.response_fixer_max_json_depth,
+      response_fixer_max_fix_size: appSettings.response_fixer_max_fix_size,
+    },
+    circuitBreakerNoticeEnabled: appSettings.enable_circuit_breaker_notice ?? false,
+    codexSessionIdCompletionEnabled: appSettings.enable_codex_session_id_completion ?? true,
+    upstreamFirstByteTimeoutSeconds: appSettings.upstream_first_byte_timeout_seconds,
+    upstreamStreamIdleTimeoutSeconds: appSettings.upstream_stream_idle_timeout_seconds,
+    upstreamRequestTimeoutNonStreamingSeconds:
+      appSettings.upstream_request_timeout_non_streaming_seconds,
+    providerCooldownSeconds: appSettings.provider_cooldown_seconds,
+    providerBaseUrlPingCacheTtlSeconds: appSettings.provider_base_url_ping_cache_ttl_seconds,
+    circuitBreakerFailureThreshold: appSettings.circuit_breaker_failure_threshold,
+    circuitBreakerOpenDurationMinutes: appSettings.circuit_breaker_open_duration_minutes,
+  };
+}
+
+function generalSettingsDraftPatchFromAppSettings(
+  appSettings: AppSettings
+): Pick<
+  GeneralSettingsDraft,
+  | "upstreamFirstByteTimeoutSeconds"
+  | "upstreamStreamIdleTimeoutSeconds"
+  | "upstreamRequestTimeoutNonStreamingSeconds"
+  | "providerCooldownSeconds"
+  | "providerBaseUrlPingCacheTtlSeconds"
+  | "circuitBreakerFailureThreshold"
+  | "circuitBreakerOpenDurationMinutes"
+> {
+  return {
+    upstreamFirstByteTimeoutSeconds: appSettings.upstream_first_byte_timeout_seconds,
+    upstreamStreamIdleTimeoutSeconds: appSettings.upstream_stream_idle_timeout_seconds,
+    upstreamRequestTimeoutNonStreamingSeconds:
+      appSettings.upstream_request_timeout_non_streaming_seconds,
+    providerCooldownSeconds: appSettings.provider_cooldown_seconds,
+    providerBaseUrlPingCacheTtlSeconds: appSettings.provider_base_url_ping_cache_ttl_seconds,
+    circuitBreakerFailureThreshold: appSettings.circuit_breaker_failure_threshold,
+    circuitBreakerOpenDurationMinutes: appSettings.circuit_breaker_open_duration_minutes,
+  };
+}
+
+function blurOnEnter(e: ReactKeyboardEvent<HTMLInputElement>) {
+  if (e.key === "Enter") e.currentTarget.blur();
+}
+
 export function useCliManagerPageDataModel() {
   const [tab, setTab] = useState<CliManagerTabKey>("general");
+  const grokTabProps = useGrokTabDataModel({ enabled: tab === "grok" });
 
   const settingsQuery = useSettingsQuery();
   const appSettings = settingsQuery.data ?? null;
@@ -86,20 +185,21 @@ export function useCliManagerPageDataModel() {
   const codexSessionIdCompletionSaving = codexSessionIdCompletionMutation.isPending;
   const commonSettingsSaving = commonSettingsMutation.isPending;
 
-  const [rectifier, setRectifier] = useState<GatewayRectifierSettingsPatch>(DEFAULT_RECTIFIER);
-  const [circuitBreakerNoticeEnabled, setCircuitBreakerNoticeEnabled] = useState(false);
-  const [codexSessionIdCompletionEnabled, setCodexSessionIdCompletionEnabled] = useState(true);
-  const [upstreamFirstByteTimeoutSeconds, setUpstreamFirstByteTimeoutSeconds] = useState<number>(0);
-  const [upstreamStreamIdleTimeoutSeconds, setUpstreamStreamIdleTimeoutSeconds] =
-    useState<number>(0);
-  const [upstreamRequestTimeoutNonStreamingSeconds, setUpstreamRequestTimeoutNonStreamingSeconds] =
-    useState<number>(0);
-  const [providerCooldownSeconds, setProviderCooldownSeconds] = useState<number>(30);
-  const [providerBaseUrlPingCacheTtlSeconds, setProviderBaseUrlPingCacheTtlSeconds] =
-    useState<number>(60);
-  const [circuitBreakerFailureThreshold, setCircuitBreakerFailureThreshold] = useState<number>(5);
-  const [circuitBreakerOpenDurationMinutes, setCircuitBreakerOpenDurationMinutes] =
-    useState<number>(30);
+  const [generalSettingsDraft, setGeneralSettingsDraft] = useState<GeneralSettingsDraft>(
+    DEFAULT_GENERAL_SETTINGS_DRAFT
+  );
+  const {
+    rectifier,
+    circuitBreakerNoticeEnabled,
+    codexSessionIdCompletionEnabled,
+    upstreamFirstByteTimeoutSeconds,
+    upstreamStreamIdleTimeoutSeconds,
+    upstreamRequestTimeoutNonStreamingSeconds,
+    providerCooldownSeconds,
+    providerBaseUrlPingCacheTtlSeconds,
+    circuitBreakerFailureThreshold,
+    circuitBreakerOpenDurationMinutes,
+  } = generalSettingsDraft;
   const cacheAnomalyMonitorEnabled = appSettings?.enable_cache_anomaly_monitor ?? false;
   const taskCompleteNotifyEnabled = appSettings?.enable_task_complete_notify ?? true;
   const notificationSoundEnabled = appSettings?.enable_notification_sound ?? true;
@@ -131,17 +231,37 @@ export function useCliManagerPageDataModel() {
   const codexConfigTomlQuery = useCliManagerCodexConfigTomlQuery({ enabled: tab === "codex" });
   const codexConfigSetMutation = useCliManagerCodexConfigSetMutation();
   const codexConfigTomlSetMutation = useCliManagerCodexConfigTomlSetMutation();
+  const refreshCodexModelCatalog = useCliManagerCodexModelCatalogRefresh();
+  const codexModelCatalogQuery = useCliManagerCodexModelCatalogQuery({
+    enabled:
+      tab === "codex" && codexInfoQuery.data?.found === true && codexConfigQuery.data != null,
+    snapshot: {
+      configPath: codexConfigQuery.data?.config_path,
+      executablePath: codexInfoQuery.data?.executable_path,
+      cliVersion: codexInfoQuery.data?.version,
+    },
+  });
 
   const codexInfo = codexInfoQuery.data ?? null;
   const codexConfig = codexConfigQuery.data ?? null;
   const codexConfigToml = codexConfigTomlQuery.data ?? null;
+  const codexModelCatalog = codexModelCatalogQuery.isError
+    ? null
+    : (codexModelCatalogQuery.data ?? null);
   const codexAvailable: "checking" | "available" | "unavailable" =
-    codexInfoQuery.isFetching && !codexInfo ? "checking" : codexInfo ? "available" : "unavailable";
+    codexInfoQuery.isFetching && !codexInfo
+      ? "checking"
+      : codexInfo?.found === true
+        ? "available"
+        : "unavailable";
   const codexLoading = codexInfoQuery.isFetching;
   const codexConfigLoading = codexConfigQuery.isFetching;
-  const codexConfigSaving = codexConfigSetMutation.isPending;
   const codexConfigTomlLoading = codexConfigTomlQuery.isFetching;
   const codexConfigTomlSaving = codexConfigTomlSetMutation.isPending;
+  const codexConfigWriting = codexConfigSetMutation.isPending || codexConfigTomlSaving;
+  const codexConfigSaving = codexConfigWriting;
+  const codexModelCatalogLoading = codexModelCatalogQuery.isFetching;
+  const codexModelCatalogError = codexModelCatalogQuery.isError;
 
   const geminiInfoQuery = useCliManagerGeminiInfoQuery({ enabled: tab === "gemini" });
   const geminiConfigQuery = useCliManagerGeminiConfigQuery({ enabled: tab === "gemini" });
@@ -160,33 +280,20 @@ export function useCliManagerPageDataModel() {
 
   useEffect(() => {
     if (!appSettings) return;
-    setRectifier({
-      verbose_provider_error: appSettings.verbose_provider_error,
-      intercept_anthropic_warmup_requests: appSettings.intercept_anthropic_warmup_requests,
-      enable_thinking_signature_rectifier: appSettings.enable_thinking_signature_rectifier,
-      enable_thinking_budget_rectifier: appSettings.enable_thinking_budget_rectifier,
-      enable_billing_header_rectifier: appSettings.enable_billing_header_rectifier,
-      enable_claude_metadata_user_id_injection:
-        appSettings.enable_claude_metadata_user_id_injection,
-      enable_response_fixer: appSettings.enable_response_fixer,
-      response_fixer_fix_encoding: appSettings.response_fixer_fix_encoding,
-      response_fixer_fix_sse_format: appSettings.response_fixer_fix_sse_format,
-      response_fixer_fix_truncated_json: appSettings.response_fixer_fix_truncated_json,
-      response_fixer_max_json_depth: appSettings.response_fixer_max_json_depth,
-      response_fixer_max_fix_size: appSettings.response_fixer_max_fix_size,
-    });
-    setCircuitBreakerNoticeEnabled(appSettings.enable_circuit_breaker_notice ?? false);
-    setCodexSessionIdCompletionEnabled(appSettings.enable_codex_session_id_completion ?? true);
-    setUpstreamFirstByteTimeoutSeconds(appSettings.upstream_first_byte_timeout_seconds);
-    setUpstreamStreamIdleTimeoutSeconds(appSettings.upstream_stream_idle_timeout_seconds);
-    setUpstreamRequestTimeoutNonStreamingSeconds(
-      appSettings.upstream_request_timeout_non_streaming_seconds
-    );
-    setProviderCooldownSeconds(appSettings.provider_cooldown_seconds);
-    setProviderBaseUrlPingCacheTtlSeconds(appSettings.provider_base_url_ping_cache_ttl_seconds);
-    setCircuitBreakerFailureThreshold(appSettings.circuit_breaker_failure_threshold);
-    setCircuitBreakerOpenDurationMinutes(appSettings.circuit_breaker_open_duration_minutes);
+    setGeneralSettingsDraft(appSettingsToGeneralSettingsDraft(appSettings));
   }, [appSettings]);
+
+  function updateGeneralSettingsDraft(patch: Partial<GeneralSettingsDraft>) {
+    setGeneralSettingsDraft((draft) => ({ ...draft, ...patch }));
+  }
+
+  function updateRectifierDraft(rectifier: GatewayRectifierSettingsPatch) {
+    setGeneralSettingsDraft((draft) => ({ ...draft, rectifier }));
+  }
+
+  function setDraftNumber<K extends keyof GeneralSettingsDraft>(key: K, value: number) {
+    setGeneralSettingsDraft((draft) => ({ ...draft, [key]: value }));
+  }
 
   async function persistRectifier(patch: Partial<GatewayRectifierSettingsPatch>) {
     if (settingsWriteBlocked) {
@@ -198,19 +305,24 @@ export function useCliManagerPageDataModel() {
 
     const prev = rectifier;
     const next = { ...prev, ...patch };
-    setRectifier(next);
+    updateRectifierDraft(next);
     try {
       const updated = await rectifierMutation.mutateAsync(next);
       if (!updated) {
-        setRectifier(prev);
+        updateRectifierDraft(prev);
         return;
       }
 
-      setRectifier({
+      updateRectifierDraft({
         verbose_provider_error: updated.verbose_provider_error,
         intercept_anthropic_warmup_requests: updated.intercept_anthropic_warmup_requests,
+        enable_thinking_effort_conflict_rectifier:
+          updated.enable_thinking_effort_conflict_rectifier,
         enable_thinking_signature_rectifier: updated.enable_thinking_signature_rectifier,
         enable_thinking_budget_rectifier: updated.enable_thinking_budget_rectifier,
+        enable_gemini_function_id_rectifier: updated.enable_gemini_function_id_rectifier,
+        enable_response_input_rectifier: updated.enable_response_input_rectifier,
+        codex_priority_billing_source: updated.codex_priority_billing_source,
         enable_billing_header_rectifier: updated.enable_billing_header_rectifier,
         enable_claude_metadata_user_id_injection: updated.enable_claude_metadata_user_id_injection,
         enable_response_fixer: updated.enable_response_fixer,
@@ -223,7 +335,7 @@ export function useCliManagerPageDataModel() {
     } catch (err) {
       logToConsole("error", "更新网关整流配置失败", { error: String(err) });
       toast("更新网关整流配置失败：请稍后重试");
-      setRectifier(prev);
+      updateRectifierDraft(prev);
     }
   }
 
@@ -236,20 +348,22 @@ export function useCliManagerPageDataModel() {
     if (rectifierAvailable !== "available") return;
 
     const prev = circuitBreakerNoticeEnabled;
-    setCircuitBreakerNoticeEnabled(enable);
+    updateGeneralSettingsDraft({ circuitBreakerNoticeEnabled: enable });
     try {
       const updated = await circuitBreakerNoticeMutation.mutateAsync(enable);
       if (!updated) {
-        setCircuitBreakerNoticeEnabled(prev);
+        updateGeneralSettingsDraft({ circuitBreakerNoticeEnabled: prev });
         return;
       }
 
-      setCircuitBreakerNoticeEnabled(updated.enable_circuit_breaker_notice ?? enable);
+      updateGeneralSettingsDraft({
+        circuitBreakerNoticeEnabled: updated.enable_circuit_breaker_notice ?? enable,
+      });
       toast(enable ? "已开启熔断通知" : "已关闭熔断通知");
     } catch (err) {
       logToConsole("error", "更新熔断通知配置失败", { error: String(err) });
       toast("更新熔断通知配置失败：请稍后重试");
-      setCircuitBreakerNoticeEnabled(prev);
+      updateGeneralSettingsDraft({ circuitBreakerNoticeEnabled: prev });
     }
   }
 
@@ -262,20 +376,22 @@ export function useCliManagerPageDataModel() {
     if (rectifierAvailable !== "available") return;
 
     const prev = codexSessionIdCompletionEnabled;
-    setCodexSessionIdCompletionEnabled(enable);
+    updateGeneralSettingsDraft({ codexSessionIdCompletionEnabled: enable });
     try {
       const updated = await codexSessionIdCompletionMutation.mutateAsync(enable);
       if (!updated) {
-        setCodexSessionIdCompletionEnabled(prev);
+        updateGeneralSettingsDraft({ codexSessionIdCompletionEnabled: prev });
         return;
       }
 
-      setCodexSessionIdCompletionEnabled(updated.enable_codex_session_id_completion ?? enable);
+      updateGeneralSettingsDraft({
+        codexSessionIdCompletionEnabled: updated.enable_codex_session_id_completion ?? enable,
+      });
       toast(enable ? "已开启 Codex Session ID 补全" : "已关闭 Codex Session ID 补全");
     } catch (err) {
       logToConsole("error", "更新 Codex Session ID 补全配置失败", { error: String(err) });
       toast("更新 Codex Session ID 补全配置失败：请稍后重试");
-      setCodexSessionIdCompletionEnabled(prev);
+      updateGeneralSettingsDraft({ codexSessionIdCompletionEnabled: prev });
     }
   }
 
@@ -350,17 +466,7 @@ export function useCliManagerPageDataModel() {
       }
       const updatedSettings = updated.settings;
 
-      setUpstreamFirstByteTimeoutSeconds(updatedSettings.upstream_first_byte_timeout_seconds);
-      setUpstreamStreamIdleTimeoutSeconds(updatedSettings.upstream_stream_idle_timeout_seconds);
-      setUpstreamRequestTimeoutNonStreamingSeconds(
-        updatedSettings.upstream_request_timeout_non_streaming_seconds
-      );
-      setProviderCooldownSeconds(updatedSettings.provider_cooldown_seconds);
-      setProviderBaseUrlPingCacheTtlSeconds(
-        updatedSettings.provider_base_url_ping_cache_ttl_seconds
-      );
-      setCircuitBreakerFailureThreshold(updatedSettings.circuit_breaker_failure_threshold);
-      setCircuitBreakerOpenDurationMinutes(updatedSettings.circuit_breaker_open_duration_minutes);
+      updateGeneralSettingsDraft(generalSettingsDraftPatchFromAppSettings(updatedSettings));
       toast("已保存");
       return updatedSettings;
     } catch (err) {
@@ -370,15 +476,7 @@ export function useCliManagerPageDataModel() {
         error_code: formatted.error_code ?? undefined,
       });
       toast(formatted.toast);
-      setUpstreamFirstByteTimeoutSeconds(prev.upstream_first_byte_timeout_seconds);
-      setUpstreamStreamIdleTimeoutSeconds(prev.upstream_stream_idle_timeout_seconds);
-      setUpstreamRequestTimeoutNonStreamingSeconds(
-        prev.upstream_request_timeout_non_streaming_seconds
-      );
-      setProviderCooldownSeconds(prev.provider_cooldown_seconds);
-      setProviderBaseUrlPingCacheTtlSeconds(prev.provider_base_url_ping_cache_ttl_seconds);
-      setCircuitBreakerFailureThreshold(prev.circuit_breaker_failure_threshold);
-      setCircuitBreakerOpenDurationMinutes(prev.circuit_breaker_open_duration_minutes);
+      updateGeneralSettingsDraft(generalSettingsDraftPatchFromAppSettings(prev));
       return null;
     }
   }
@@ -388,11 +486,22 @@ export function useCliManagerPageDataModel() {
   }
 
   async function refreshCodex() {
-    await Promise.all([
+    if (codexConfigWriting) return;
+    const [configResult, , infoResult] = await Promise.all([
       codexConfigQuery.refetch(),
       codexConfigTomlQuery.refetch(),
       codexInfoQuery.refetch(),
     ]);
+    const nextConfig = configResult.data ?? null;
+    const nextInfo = infoResult.data ?? null;
+    if (configResult.isError || infoResult.isError || !nextConfig || nextInfo?.found !== true) {
+      return;
+    }
+    await refreshCodexModelCatalog({
+      configPath: nextConfig.config_path,
+      executablePath: nextInfo.executable_path,
+      cliVersion: nextInfo.version,
+    });
   }
 
   async function refreshGeminiInfo() {
@@ -437,6 +546,19 @@ export function useCliManagerPageDataModel() {
     return true;
   }
 
+  async function persistCodexOauthCompatibleProxyMode(enabled: boolean) {
+    const updated = await persistCommonSettings({
+      codex_oauth_compatible_proxy_mode: enabled,
+    });
+    if (!updated) {
+      return false;
+    }
+
+    await refreshCodex();
+    toast(enabled ? "已开启 Codex OAuth 兼容代理模式" : "已关闭 Codex OAuth 兼容代理模式");
+    return true;
+  }
+
   async function pickCodexHomeDirectory(initialPath?: string): Promise<string | null> {
     try {
       return await openDesktopSinglePath({
@@ -457,16 +579,17 @@ export function useCliManagerPageDataModel() {
     }
   }
 
-  async function persistCodexConfig(patch: CodexConfigPatch) {
-    if (codexConfigSaving) return;
-    if (codexAvailable !== "available") return;
+  async function persistCodexConfig(patch: CodexConfigPatch): Promise<CodexConfigState | null> {
+    if (codexConfigWriting) return null;
+    if (!codexConfig) return null;
 
     try {
       const updated = await codexConfigSetMutation.mutateAsync(patch);
       if (!updated) {
-        return;
+        return null;
       }
       toast("已更新 Codex 配置");
+      return updated;
     } catch (err) {
       const formatted = formatActionFailureToast("更新 Codex 配置", err);
       logToConsole("error", "更新 Codex 配置失败", {
@@ -475,12 +598,13 @@ export function useCliManagerPageDataModel() {
         patch,
       });
       toast(formatted.toast);
+      return null;
     }
   }
 
   async function persistCodexConfigToml(toml: string): Promise<boolean> {
-    if (codexConfigTomlSaving) return false;
-    if (codexAvailable !== "available") return false;
+    if (codexConfigWriting) return false;
+    if (!codexConfig) return false;
 
     try {
       const updated = await codexConfigTomlSetMutation.mutateAsync({ toml });
@@ -541,10 +665,6 @@ export function useCliManagerPageDataModel() {
     }
   }
 
-  function blurOnEnter(e: ReactKeyboardEvent<HTMLInputElement>) {
-    if (e.key === "Enter") e.currentTarget.blur();
-  }
-
   return {
     tab,
     setTab,
@@ -574,19 +694,26 @@ export function useCliManagerPageDataModel() {
       commonSettingsSaving: commonSettingsSaving || settingsWriteBlocked,
       onPersistCommonSettings: persistCommonSettings,
       upstreamFirstByteTimeoutSeconds,
-      setUpstreamFirstByteTimeoutSeconds,
+      setUpstreamFirstByteTimeoutSeconds: (value: number) =>
+        setDraftNumber("upstreamFirstByteTimeoutSeconds", value),
       upstreamStreamIdleTimeoutSeconds,
-      setUpstreamStreamIdleTimeoutSeconds,
+      setUpstreamStreamIdleTimeoutSeconds: (value: number) =>
+        setDraftNumber("upstreamStreamIdleTimeoutSeconds", value),
       upstreamRequestTimeoutNonStreamingSeconds,
-      setUpstreamRequestTimeoutNonStreamingSeconds,
+      setUpstreamRequestTimeoutNonStreamingSeconds: (value: number) =>
+        setDraftNumber("upstreamRequestTimeoutNonStreamingSeconds", value),
       providerCooldownSeconds,
-      setProviderCooldownSeconds,
+      setProviderCooldownSeconds: (value: number) =>
+        setDraftNumber("providerCooldownSeconds", value),
       providerBaseUrlPingCacheTtlSeconds,
-      setProviderBaseUrlPingCacheTtlSeconds,
+      setProviderBaseUrlPingCacheTtlSeconds: (value: number) =>
+        setDraftNumber("providerBaseUrlPingCacheTtlSeconds", value),
       circuitBreakerFailureThreshold,
-      setCircuitBreakerFailureThreshold,
+      setCircuitBreakerFailureThreshold: (value: number) =>
+        setDraftNumber("circuitBreakerFailureThreshold", value),
       circuitBreakerOpenDurationMinutes,
-      setCircuitBreakerOpenDurationMinutes,
+      setCircuitBreakerOpenDurationMinutes: (value: number) =>
+        setDraftNumber("circuitBreakerOpenDurationMinutes", value),
       blurOnEnter,
     },
     claudeTabProps: {
@@ -608,9 +735,12 @@ export function useCliManagerPageDataModel() {
       codexConfigSaving,
       codexConfigTomlLoading,
       codexConfigTomlSaving,
+      codexModelCatalogLoading,
+      codexModelCatalogError,
       codexInfo,
       codexConfig,
       codexConfigToml,
+      codexModelCatalog,
       appSettings,
       codexHomeSettingsSaving: commonSettingsSaving || settingsWriteBlocked,
       refreshCodex,
@@ -618,6 +748,7 @@ export function useCliManagerPageDataModel() {
       persistCodexConfig,
       persistCodexConfigToml,
       persistCodexHomeSettings,
+      persistCodexOauthCompatibleProxyMode,
       pickCodexHomeDirectory,
     },
     cx2ccTabProps: {
@@ -635,5 +766,6 @@ export function useCliManagerPageDataModel() {
       refreshGeminiInfo,
       persistGeminiConfig,
     },
+    grokTabProps,
   };
 }

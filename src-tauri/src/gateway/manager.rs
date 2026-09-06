@@ -236,6 +236,7 @@ mod tests {
                 cost_multiplier: 1.0,
                 priority: Some(100),
                 claude_models: None,
+                model_policy: None,
                 limit_5h_usd: None,
                 limit_daily_usd: None,
                 daily_reset_mode: Some(providers::DailyResetMode::Fixed),
@@ -248,6 +249,7 @@ mod tests {
                 source_provider_id: None,
                 bridge_type: None,
                 stream_idle_timeout_seconds: None,
+                extension_values: None,
             },
         )
         .expect("insert provider")

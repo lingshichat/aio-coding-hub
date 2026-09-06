@@ -8,8 +8,10 @@ import {
 import type { CliKey } from "../providers/providers";
 import { invokeGeneratedIpc, mapGeneratedCommandResponse } from "../generatedIpc";
 import { narrowGeneratedStringUnion, type Override } from "../generatedTypeUtils";
+import { pluginExportReplayFixture, type PluginReplayFixture } from "../plugins";
+import { CLI_KEYS } from "../../constants/clis";
 
-const CLI_KEY_VALUES = ["claude", "codex", "gemini"] as const satisfies readonly CliKey[];
+const CLI_KEY_VALUES = CLI_KEYS;
 
 export const REQUEST_LOGS_DEFAULT_LIMIT = 50;
 export const REQUEST_LOGS_MIN_LIMIT = 1;
@@ -232,5 +234,18 @@ export async function requestAttemptLogsByTraceId(traceId: string, limit?: numbe
         await commands.requestAttemptLogsByTraceId(normalizedTraceId, normalizedLimit),
         (rows) => rows.map(toRequestAttemptLog)
       ),
+  });
+}
+
+export async function requestLogExportPluginReplayFixture(input: {
+  traceId: string;
+  hookName: string;
+  pluginId?: string | null;
+}): Promise<PluginReplayFixture> {
+  const traceId = normalizeRequestLogTraceId(input.traceId);
+  return pluginExportReplayFixture({
+    traceId,
+    hookName: input.hookName,
+    pluginId: input.pluginId,
   });
 }

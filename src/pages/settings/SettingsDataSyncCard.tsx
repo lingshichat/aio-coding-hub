@@ -20,8 +20,6 @@ function formatRelativeTime(timestamp: number): string {
 
 export function SettingsDataSyncCard({
   about,
-  modelPricesAvailable,
-  modelPricesCount,
   lastModelPricesSyncError,
   lastModelPricesSyncReport,
   lastModelPricesSyncTime,
@@ -32,8 +30,6 @@ export function SettingsDataSyncCard({
   syncModelPrices,
 }: {
   about: AppAboutInfo | null;
-  modelPricesAvailable: AvailableStatus;
-  modelPricesCount: number | null;
   lastModelPricesSyncError: string | null;
   lastModelPricesSyncReport: ModelPricesSyncReport | null;
   lastModelPricesSyncTime: number | null;
@@ -41,41 +37,42 @@ export function SettingsDataSyncCard({
   todayRequestsAvailable: AvailableStatus;
   todayRequestsTotal: number | null;
   syncingModelPrices: boolean;
-  syncModelPrices: (force: boolean) => Promise<void>;
+  syncModelPrices: () => Promise<void>;
 }) {
+  const syncFailed = lastModelPricesSyncReport?.status === "failed";
+  const syncStatus = lastModelPricesSyncError
+    ? "同步失败"
+    : lastModelPricesSyncReport
+      ? syncFailed
+        ? "同步失败"
+        : lastModelPricesSyncReport.status === "not_modified"
+          ? "无变更"
+          : `+${lastModelPricesSyncReport.inserted} / ~${lastModelPricesSyncReport.updated} · 共 ${lastModelPricesSyncReport.total} 条`
+      : "未同步";
+  const syncTimeLabel = lastModelPricesSyncError || syncFailed ? "尝试" : "更新";
+
   return (
     <Card>
-      <div className="mb-4 font-semibold text-slate-900 dark:text-slate-100">数据与同步</div>
-      <div className="divide-y divide-slate-100 dark:divide-slate-700">
+      <div className="mb-4 font-semibold text-foreground">数据与同步</div>
+      <div className="divide-y divide-line-subtle">
         <SettingsRow label="模型定价">
-          <span className="font-mono text-sm text-slate-900 dark:text-slate-100">
-            {modelPricesAvailable === "checking"
-              ? "加载中…"
-              : modelPricesAvailable === "unavailable"
-                ? "—"
-                : modelPricesCount === 0
-                  ? "未同步"
-                  : `${modelPricesCount} 条`}
+          <span
+            className={
+              lastModelPricesSyncError || syncFailed
+                ? "text-xs text-rose-600"
+                : "text-xs text-muted-foreground"
+            }
+          >
+            {syncStatus}
           </span>
-          {lastModelPricesSyncError ? (
-            <span className="text-xs text-rose-600">失败</span>
-          ) : lastModelPricesSyncReport ? (
-            <span className="text-xs text-slate-500 dark:text-slate-400">
-              {lastModelPricesSyncReport.status === "not_modified"
-                ? "最新"
-                : `+${lastModelPricesSyncReport.inserted} / ~${lastModelPricesSyncReport.updated}`}
-            </span>
-          ) : null}
           {lastModelPricesSyncTime ? (
-            <span className="text-xs text-slate-400 dark:text-slate-500">
-              {formatRelativeTime(lastModelPricesSyncTime)} 同步
+            <span className="text-xs text-muted-foreground">
+              {formatRelativeTime(lastModelPricesSyncTime)} · {syncTimeLabel}
             </span>
           ) : null}
         </SettingsRow>
         <SettingsRow label="定价匹配">
-          <span className="text-xs text-slate-500 dark:text-slate-400">
-            prefix / wildcard / exact
-          </span>
+          <span className="text-xs text-muted-foreground">prefix / wildcard / exact</span>
           <Button
             onClick={openModelPriceAliasesDialog}
             variant="secondary"
@@ -86,7 +83,7 @@ export function SettingsDataSyncCard({
           </Button>
         </SettingsRow>
         <SettingsRow label="今日请求">
-          <span className="font-mono text-sm text-slate-900 dark:text-slate-100">
+          <span className="font-mono text-sm text-foreground">
             {todayRequestsAvailable === "checking"
               ? "加载中…"
               : todayRequestsAvailable === "unavailable"
@@ -95,24 +92,14 @@ export function SettingsDataSyncCard({
           </span>
         </SettingsRow>
         <SettingsRow label="同步定价">
-          <div className="flex gap-2">
-            <Button
-              onClick={() => syncModelPrices(false)}
-              variant="secondary"
-              size="sm"
-              disabled={syncingModelPrices}
-            >
-              {syncingModelPrices ? "同步中" : "同步"}
-            </Button>
-            <Button
-              onClick={() => syncModelPrices(true)}
-              variant="secondary"
-              size="sm"
-              disabled={syncingModelPrices}
-            >
-              强制
-            </Button>
-          </div>
+          <Button
+            onClick={() => void syncModelPrices()}
+            variant="secondary"
+            size="sm"
+            disabled={syncingModelPrices}
+          >
+            {syncingModelPrices ? "同步中" : "同步"}
+          </Button>
         </SettingsRow>
       </div>
     </Card>

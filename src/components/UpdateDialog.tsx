@@ -28,23 +28,53 @@ const READONLY_PLUGINS = [
   thematicBreakPlugin(),
 ];
 
+async function openChangelogLink(url: string) {
+  try {
+    await openDesktopUrl(url);
+  } catch (err) {
+    logToConsole("error", "打开更新日志链接失败", { error: String(err), url });
+    toast("打开链接失败：请查看控制台日志");
+  }
+}
+
+async function openReleases() {
+  try {
+    await openDesktopUrl(AIO_RELEASES_URL);
+  } catch (err) {
+    logToConsole("error", "打开 Releases 失败", { error: String(err), url: AIO_RELEASES_URL });
+    toast("打开下载页失败：请查看控制台日志");
+  }
+}
+
+function getChangelogLinkHref(target: EventTarget | null) {
+  if (!(target instanceof Element)) return null;
+
+  const anchor = target.closest("a[href]");
+  const href = anchor?.getAttribute("href");
+  return href || null;
+}
+
+function handleChangelogLinkClick(event: MouseEvent) {
+  const href = getChangelogLinkHref(event.target);
+  if (!href) return;
+
+  event.preventDefault();
+  event.stopPropagation();
+  void openChangelogLink(href);
+}
+
+function connectChangelogLinks(node: HTMLElement | null) {
+  if (!node) return;
+
+  node.addEventListener("click", handleChangelogLinkClick);
+  return () => node.removeEventListener("click", handleChangelogLinkClick);
+}
+
 export function UpdateDialog() {
   const meta = useUpdateMeta();
   const updateCandidate = meta.updateCandidate;
   const about = meta.about;
   const isPortable = about?.run_mode === "portable";
-
-  async function openReleases() {
-    try {
-      await openDesktopUrl(AIO_RELEASES_URL);
-    } catch (err) {
-      logToConsole("error", "打开 Releases 失败", { error: String(err), url: AIO_RELEASES_URL });
-      try {
-        window.open(AIO_RELEASES_URL, "_blank", "noopener,noreferrer");
-      } catch {}
-      toast("打开下载页失败：请查看控制台日志");
-    }
-  }
 
   async function installUpdate() {
     if (!updateCandidate) return;
@@ -99,20 +129,20 @@ export function UpdateDialog() {
       className="max-w-xl"
     >
       <div className="space-y-4">
-        <div className="grid gap-2 text-sm text-slate-700 dark:text-slate-300">
+        <div className="grid gap-2 text-sm text-secondary-foreground">
           <div className="flex items-center justify-between gap-4">
-            <span className="text-slate-500 dark:text-slate-400">当前版本</span>
+            <span className="text-muted-foreground">当前版本</span>
             <span className="font-mono">
               {updateCandidate?.currentVersion ?? about?.app_version ?? "—"}
             </span>
           </div>
           <div className="flex items-center justify-between gap-4">
-            <span className="text-slate-500 dark:text-slate-400">最新版本</span>
+            <span className="text-muted-foreground">最新版本</span>
             <span className="font-mono">{updateCandidate?.version ?? "—"}</span>
           </div>
           {updateCandidate?.date ? (
             <div className="flex items-center justify-between gap-4">
-              <span className="text-slate-500 dark:text-slate-400">发布日期</span>
+              <span className="text-muted-foreground">发布日期</span>
               <span className="font-mono">{formatIsoDateTime(updateCandidate.date)}</span>
             </div>
           ) : null}
@@ -120,28 +150,32 @@ export function UpdateDialog() {
 
         {updateCandidate?.body ? (
           <div className="space-y-1">
-            <span className="text-xs font-medium text-slate-500 dark:text-slate-400">更新日志</span>
-            <div className="max-h-60 overflow-y-auto rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 text-sm text-slate-700 dark:text-slate-300">
+            <span className="text-xs font-medium text-muted-foreground">更新日志</span>
+            <section
+              ref={connectChangelogLinks}
+              className="max-h-60 overflow-y-auto rounded-lg border border-border bg-white dark:bg-secondary text-sm text-secondary-foreground"
+              aria-label="更新日志"
+            >
               <MDXEditor
                 markdown={updateCandidate.body}
                 readOnly
                 plugins={READONLY_PLUGINS}
                 contentEditableClassName="prose prose-sm dark:prose-invert max-w-none px-3 py-2"
               />
-            </div>
+            </section>
           </div>
         ) : null}
 
         {!updateCandidate ? (
-          <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3 text-sm text-slate-700 dark:text-slate-300">
+          <div className="rounded-lg border border-border bg-white dark:bg-secondary p-3 text-sm text-secondary-foreground">
             未发现可安装更新。
           </div>
         ) : null}
 
         {meta.installingUpdate ? (
-          <div className="rounded-lg border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 p-3 text-sm text-slate-700 dark:text-slate-300">
+          <div className="rounded-lg border border-border bg-white dark:bg-secondary p-3 text-sm text-secondary-foreground">
             <div className="font-medium">下载并安装中…</div>
-            <div className="mt-1 font-mono text-xs text-slate-500 dark:text-slate-400">
+            <div className="mt-1 font-mono text-xs text-muted-foreground">
               {formatBytes(meta.installDownloadedBytes)}
               {meta.installTotalBytes != null ? ` / ${formatBytes(meta.installTotalBytes)}` : ""}
             </div>

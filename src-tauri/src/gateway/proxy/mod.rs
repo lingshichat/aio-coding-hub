@@ -1,6 +1,6 @@
 //! Usage: Gateway proxy module facade (exports the proxy handler + shared types).
 
-use axum::http::{HeaderMap, HeaderValue};
+use axum::http::{HeaderMap, Method};
 
 mod abort_guard;
 mod caches;
@@ -17,7 +17,9 @@ mod http_util;
 mod logging;
 mod model_rewrite;
 pub(in crate::gateway) mod protocol_bridge;
+pub(crate) mod provider_adapters;
 pub(in crate::gateway) mod provider_router;
+mod request_body;
 mod request_context;
 mod request_end;
 pub(in crate::gateway) mod status_override;
@@ -26,7 +28,8 @@ pub(in crate::gateway) mod upstream_client_error_rules;
 
 pub(super) use caches::{ProviderBaseUrlPingCache, RecentErrorCache};
 pub(super) use error_code::GatewayErrorCode;
-pub(in crate::gateway) use fake_200::is_fake_200_non_stream_body;
+pub(in crate::gateway) use failover::select_base_url_by_mode;
+pub(in crate::gateway) use fake_200::{detect_fake_200_non_stream_body, Fake200Profile};
 pub(in crate::gateway) use logging::spawn_enqueue_request_log_with_backpressure;
 pub(super) use types::ErrorCategory;
 
@@ -41,8 +44,21 @@ fn is_claude_count_tokens_request(cli_key: &str, forwarded_path: &str) -> bool {
     cli_key == "claude" && forwarded_path == CLAUDE_COUNT_TOKENS_PATH
 }
 
-fn should_observe_request(cli_key: &str, forwarded_path: &str) -> bool {
+fn should_observe_request(cli_key: &str, method: &Method, forwarded_path: &str) -> bool {
+    if is_codex_model_discovery_request(cli_key, method, forwarded_path) {
+        return false;
+    }
+
     cli_key != "claude" || forwarded_path == CLAUDE_LOGGED_MESSAGES_PATH
+}
+
+fn is_codex_model_discovery_request(cli_key: &str, method: &Method, forwarded_path: &str) -> bool {
+    cli_key == "codex"
+        && method == Method::GET
+        && matches!(
+            forwarded_path.trim_end_matches('/'),
+            "/v1/models" | "/models"
+        )
 }
 
 fn is_claude_probe_request(
@@ -90,20 +106,18 @@ pub(super) fn is_internal_forwarded_request(headers: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-pub(super) fn mark_internal_forwarded_request(headers: &mut HeaderMap) {
-    headers.insert(
-        AIO_INTERNAL_FORWARD_HEADER,
-        HeaderValue::from_static(AIO_INTERNAL_FORWARD_VALUE),
-    );
-}
-
 fn compute_observe_request(
     cli_key: &str,
+    method: &Method,
     forwarded_path: &str,
     headers: &HeaderMap,
     introspection_json: Option<&serde_json::Value>,
 ) -> bool {
-    if !should_observe_request(cli_key, forwarded_path) {
+    if is_internal_forwarded_request(headers) {
+        return false;
+    }
+
+    if !should_observe_request(cli_key, method, forwarded_path) {
         return false;
     }
 
@@ -111,8 +125,7 @@ fn compute_observe_request(
         return true;
     }
 
-    !is_internal_forwarded_request(headers)
-        && !is_claude_probe_request(forwarded_path, introspection_json)
+    !is_claude_probe_request(forwarded_path, introspection_json)
 }
 
 fn should_seed_in_progress_request_log(cli_key: &str, forwarded_path: &str, observe: bool) -> bool {
@@ -141,6 +154,8 @@ pub(super) struct RequestLogEnqueueArgs {
     pub(super) attempts_json: String,
     pub(super) requested_model: Option<String>,
     pub(super) created_at_ms: i64,
+    pub(super) last_activity_ms: Option<i64>,
+    pub(super) activity_details_json: Option<String>,
     pub(super) created_at: i64,
     pub(super) usage_metrics: Option<crate::usage::UsageMetrics>,
     pub(super) usage: Option<crate::usage::UsageExtract>,

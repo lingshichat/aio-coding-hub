@@ -1,6 +1,315 @@
 use super::*;
 
 #[test]
+fn migrate_v37_to_v38_adds_model_policy_without_clearing_legacy_fields() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    conn.execute_batch(
+        r#"
+CREATE TABLE providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cli_key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  api_key_plaintext TEXT NOT NULL,
+  claude_models_json TEXT NOT NULL DEFAULT '{}',
+  supported_models_json TEXT NOT NULL DEFAULT '{}',
+  model_mapping_json TEXT NOT NULL DEFAULT '{}',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+INSERT INTO providers(
+  cli_key, name, base_url, api_key_plaintext, claude_models_json,
+  supported_models_json, model_mapping_json, created_at, updated_at
+) VALUES
+  ('claude', 'legacy', 'https://example.com', 'sk', '{"main_model":"legacy-main"}', '{"legacy":1}', '{"legacy":2}', 1, 1),
+  ('codex', 'default', 'https://example.com', 'sk', '{}', '{"legacy":3}', '{"legacy":4}', 1, 1);
+PRAGMA user_version = 37;
+        "#,
+    )
+    .expect("insert v37 providers");
+
+    v37_to_v38::migrate_v37_to_v38(&mut conn).expect("migrate v37->v38");
+
+    let rows: Vec<(String, Option<String>, String, String)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT cli_key, model_policy_json, supported_models_json, model_mapping_json FROM providers ORDER BY id DESC LIMIT 2",
+            )
+            .expect("prepare policy rows");
+        stmt.query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })
+        .expect("query policy rows")
+        .collect::<Result<_, _>>()
+        .expect("read policy rows")
+    };
+    assert_eq!(rows[0].0, "codex");
+    assert_eq!(
+        rows[0].1.as_deref(),
+        Some(r#"{"version":1,"mode":"all","modelPatterns":[],"mappings":[]}"#)
+    );
+    assert_eq!(rows[0].2, r#"{"legacy":3}"#);
+    assert_eq!(rows[0].3, r#"{"legacy":4}"#);
+    assert_eq!(rows[1].0, "claude");
+    assert!(rows[1].1.is_none());
+    assert_eq!(rows[1].2, r#"{"legacy":1}"#);
+    assert_eq!(rows[1].3, r#"{"legacy":2}"#);
+
+    conn.execute(
+        "INSERT INTO providers(cli_key, name, base_url, api_key_plaintext, created_at, updated_at) VALUES ('gemini', 'new', 'https://example.com', 'sk', 1, 1)",
+        [],
+    )
+    .expect("insert provider using v38 model policy default");
+    let default_policy: Option<String> = conn
+        .query_row(
+            "SELECT model_policy_json FROM providers WHERE name = 'new'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read v38 model policy default");
+    assert_eq!(
+        default_policy.as_deref(),
+        Some(r#"{"version":1,"mode":"all","modelPatterns":[],"mappings":[]}"#)
+    );
+
+    v37_to_v38::migrate_v37_to_v38(&mut conn).expect("migrate v37->v38 twice");
+}
+
+#[test]
+fn migrate_v38_to_v39_adds_and_backfills_model_prices_vendor() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    conn.execute_batch(
+        r#"
+CREATE TABLE model_prices (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cli_key TEXT NOT NULL,
+  model TEXT NOT NULL,
+  price_json TEXT NOT NULL,
+  currency TEXT NOT NULL DEFAULT 'USD',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(cli_key, model)
+);
+INSERT INTO model_prices(cli_key, model, price_json, created_at, updated_at) VALUES
+  ('claude', 'claude-opus-4-5', '{}', 1, 1),
+  ('codex', 'gpt-5.4', '{}', 1, 1),
+  ('gemini', 'gemini-3-pro', '{}', 1, 1),
+  ('grok', 'grok-5', '{}', 1, 1);
+PRAGMA user_version = 38;
+        "#,
+    )
+    .expect("insert v38 model_prices");
+
+    v38_to_v39::migrate_v38_to_v39(&mut conn).expect("migrate v38->v39");
+
+    let vendors: Vec<(String, String)> = {
+        let mut stmt = conn
+            .prepare("SELECT cli_key, vendor FROM model_prices ORDER BY cli_key")
+            .expect("prepare vendor rows");
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .expect("query vendor rows")
+            .collect::<Result<_, _>>()
+            .expect("read vendor rows")
+    };
+    assert_eq!(
+        vendors,
+        vec![
+            ("claude".to_string(), "anthropic".to_string()),
+            ("codex".to_string(), "openai".to_string()),
+            ("gemini".to_string(), "google".to_string()),
+            ("grok".to_string(), "xai".to_string()),
+        ]
+    );
+
+    // Re-running must not fail or clobber a vendor written by a newer sync.
+    conn.execute(
+        "UPDATE model_prices SET vendor = 'deepseek' WHERE cli_key = 'claude'",
+        [],
+    )
+    .expect("simulate synced vendor");
+    v38_to_v39::migrate_v38_to_v39(&mut conn).expect("migrate v38->v39 twice");
+    let vendor: String = conn
+        .query_row(
+            "SELECT vendor FROM model_prices WHERE cli_key = 'claude'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read vendor after rerun");
+    assert_eq!(vendor, "deepseek");
+}
+
+#[test]
+fn migrate_v32_to_v33_backfills_pool_and_default_route_orders() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    conn.execute_batch(
+        r#"
+CREATE TABLE providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cli_key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  base_urls_json TEXT NOT NULL DEFAULT '[]',
+  base_url_mode TEXT NOT NULL DEFAULT 'order',
+  claude_models_json TEXT NOT NULL DEFAULT '{}',
+  api_key_plaintext TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 100,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  cost_multiplier REAL NOT NULL DEFAULT 1.0,
+  supported_models_json TEXT NOT NULL DEFAULT '{}',
+  model_mapping_json TEXT NOT NULL DEFAULT '{}',
+  auth_mode TEXT NOT NULL DEFAULT 'api_key',
+  oauth_provider_type TEXT,
+  oauth_access_token TEXT,
+  oauth_refresh_token TEXT,
+  oauth_expires_at INTEGER,
+  oauth_email TEXT,
+  oauth_last_error TEXT,
+  limit_5h_usd REAL,
+  limit_daily_usd REAL,
+  daily_reset_mode TEXT NOT NULL DEFAULT 'fixed',
+  daily_reset_time TEXT NOT NULL DEFAULT '00:00:00',
+  limit_weekly_usd REAL,
+  limit_monthly_usd REAL,
+  limit_total_usd REAL,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  note TEXT NOT NULL DEFAULT '',
+  source_provider_id INTEGER,
+  bridge_type TEXT,
+  stream_idle_timeout_seconds INTEGER,
+  UNIQUE(cli_key, name)
+);
+"#,
+    )
+    .expect("create providers table");
+
+    for (id, name, enabled, sort_order) in [
+        (1_i64, "p1", 1_i64, 0_i64),
+        (2_i64, "p2", 0_i64, 1_i64),
+        (3_i64, "p3", 1_i64, 2_i64),
+    ] {
+        conn.execute(
+            r#"
+INSERT INTO providers(
+  id,
+  cli_key,
+  name,
+  base_url,
+  api_key_plaintext,
+  enabled,
+  created_at,
+  updated_at,
+  sort_order
+) VALUES (?1, 'claude', ?2, 'https://example.com', 'sk', ?3, 1, 1, ?4)
+"#,
+            rusqlite::params![id, name, enabled, sort_order],
+        )
+        .expect("insert provider");
+    }
+
+    v32_to_v33::migrate_v32_to_v33(&mut conn).expect("migrate v32->v33");
+
+    let pool_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT provider_id FROM provider_pool_order ORDER BY sort_order ASC")
+            .expect("prepare pool");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query pool")
+            .map(|row| row.expect("pool row"))
+            .collect()
+    };
+    assert_eq!(pool_ids, vec![1, 2, 3]);
+
+    let default_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT provider_id FROM default_route_providers ORDER BY sort_order ASC")
+            .expect("prepare default");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query default")
+            .map(|row| row.expect("default row"))
+            .collect()
+    };
+    assert_eq!(default_ids, vec![1, 3]);
+}
+
+#[test]
+fn ensure_patches_do_not_repopulate_default_route_members() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    apply_migrations(&mut conn).expect("apply migrations");
+
+    for (id, name, sort_order) in [
+        (1_i64, "p1", 0_i64),
+        (2_i64, "p2", 1_i64),
+        (3_i64, "p3", 2_i64),
+    ] {
+        conn.execute(
+            r#"
+INSERT INTO providers(
+  id,
+  cli_key,
+  name,
+  base_url,
+  api_key_plaintext,
+  enabled,
+  created_at,
+  updated_at,
+  sort_order
+) VALUES (?1, 'claude', ?2, 'https://example.com', 'sk', 1, 1, 1, ?3)
+"#,
+            rusqlite::params![id, name, sort_order],
+        )
+        .expect("insert provider");
+    }
+
+    for (provider_id, sort_order) in [(1_i64, 0_i64), (2_i64, 1_i64), (3_i64, 2_i64)] {
+        conn.execute(
+            r#"
+INSERT INTO default_route_providers(
+  cli_key,
+  provider_id,
+  sort_order,
+  created_at,
+  updated_at
+) VALUES ('claude', ?1, ?2, 1, 1)
+"#,
+            rusqlite::params![provider_id, sort_order],
+        )
+        .expect("insert default route provider");
+    }
+    conn.execute(
+        "DELETE FROM default_route_providers WHERE cli_key = 'claude' AND provider_id = 2",
+        [],
+    )
+    .expect("simulate removing provider from default route");
+
+    ensure::apply_ensure_patches(&mut conn).expect("apply ensure patches");
+
+    let default_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT provider_id FROM default_route_providers ORDER BY sort_order ASC")
+            .expect("prepare default");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query default")
+            .map(|row| row.expect("default row"))
+            .collect()
+    };
+    assert_eq!(default_ids, vec![1, 3]);
+
+    let pool_ids: Vec<i64> = {
+        let mut stmt = conn
+            .prepare("SELECT provider_id FROM provider_pool_order ORDER BY sort_order ASC")
+            .expect("prepare pool");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query pool")
+            .map(|row| row.expect("pool row"))
+            .collect()
+    };
+    assert_eq!(pool_ids, vec![1, 2, 3]);
+}
+
+#[test]
 fn migrate_v25_to_v26_backfills_claude_models_json_from_legacy_mapping() {
     let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
 
@@ -102,6 +411,206 @@ INSERT INTO providers(
         )
         .expect("read model_mapping_json");
     assert_eq!(model_mapping_json.trim(), "{}");
+}
+
+#[test]
+fn ensure_plugin_tables_is_idempotent() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    apply_migrations(&mut conn).expect("apply migrations once");
+    apply_migrations(&mut conn).expect("apply migrations twice");
+
+    for table in [
+        "plugins",
+        "plugin_versions",
+        "plugin_configs",
+        "plugin_permissions",
+        "plugin_audit_logs",
+        "plugin_market_sources",
+        "plugin_runtime_failures",
+        "plugin_hook_execution_reports",
+    ] {
+        assert!(
+            test_has_table(&conn, table),
+            "missing plugin table after ensure patches: {table}"
+        );
+    }
+
+    assert!(test_has_column(&conn, "plugins", "plugin_id"));
+    assert!(test_has_column(&conn, "plugins", "current_version"));
+    assert!(test_has_column(&conn, "plugins", "status"));
+    assert!(test_has_column(&conn, "plugins", "manifest_json"));
+    assert!(test_has_column(&conn, "plugins", "last_error"));
+    assert!(test_has_column(&conn, "plugin_configs", "config_json"));
+    assert!(test_has_column(
+        &conn,
+        "plugin_permissions",
+        "permissions_json"
+    ));
+    assert!(test_has_index(
+        &conn,
+        "idx_plugin_hook_execution_reports_created_at"
+    ));
+}
+
+#[test]
+fn migrations_create_provider_extension_values_table() {
+    let mut conn = rusqlite::Connection::open_in_memory().unwrap();
+    apply_migrations(&mut conn).expect("apply migrations");
+
+    assert!(test_has_table(&conn, "provider_extension_values"));
+    assert!(test_has_column(
+        &conn,
+        "provider_extension_values",
+        "provider_id"
+    ));
+    assert!(test_has_column(
+        &conn,
+        "provider_extension_values",
+        "plugin_id"
+    ));
+    assert!(test_has_column(
+        &conn,
+        "provider_extension_values",
+        "namespace"
+    ));
+    assert!(test_has_column(
+        &conn,
+        "provider_extension_values",
+        "values_json"
+    ));
+}
+
+#[test]
+fn ensure_patch_drops_legacy_request_attempt_logs_table() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    apply_migrations(&mut conn).expect("create current schema");
+
+    conn.execute_batch(
+        r#"
+CREATE TABLE request_attempt_logs (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  trace_id TEXT NOT NULL,
+  provider_id INTEGER NOT NULL
+);
+"#,
+    )
+    .expect("create legacy request_attempt_logs table");
+
+    assert!(test_has_table(&conn, "request_attempt_logs"));
+
+    apply_migrations(&mut conn).expect("apply migrations");
+
+    assert!(!test_has_table(&conn, "request_attempt_logs"));
+
+    apply_migrations(&mut conn).expect("apply migrations twice");
+    assert!(!test_has_table(&conn, "request_attempt_logs"));
+}
+
+#[test]
+fn ensure_patch_adds_reset_credit_count_to_existing_oauth_snapshot_table() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    conn.execute_batch(
+        r#"
+CREATE TABLE providers (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  cli_key TEXT NOT NULL,
+  name TEXT NOT NULL,
+  base_url TEXT NOT NULL,
+  base_urls_json TEXT NOT NULL DEFAULT '[]',
+  base_url_mode TEXT NOT NULL DEFAULT 'order',
+  claude_models_json TEXT NOT NULL DEFAULT '{}',
+  api_key_plaintext TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  priority INTEGER NOT NULL DEFAULT 100,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL DEFAULT 0,
+  cost_multiplier REAL NOT NULL DEFAULT 1.0,
+  supported_models_json TEXT NOT NULL DEFAULT '{}',
+  model_mapping_json TEXT NOT NULL DEFAULT '{}',
+  UNIQUE(cli_key, name)
+);
+
+CREATE TABLE provider_oauth_limit_snapshots (
+  provider_id INTEGER PRIMARY KEY,
+  limit_short_label TEXT,
+  limit_5h_text TEXT,
+  limit_weekly_text TEXT,
+  limit_5h_reset_at INTEGER,
+  limit_weekly_reset_at INTEGER,
+  checked_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  FOREIGN KEY(provider_id) REFERENCES providers(id) ON DELETE CASCADE
+);
+
+CREATE TABLE prompts (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  workspace_id INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  content TEXT NOT NULL,
+  enabled INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+INSERT INTO providers(
+  id,
+  cli_key,
+  name,
+  base_url,
+  base_urls_json,
+  base_url_mode,
+  claude_models_json,
+  api_key_plaintext,
+  enabled,
+  priority,
+  created_at,
+  updated_at,
+  sort_order,
+  cost_multiplier,
+  supported_models_json,
+  model_mapping_json
+) VALUES (1, 'codex', 'legacy oauth', 'https://example.com', '[]', 'order', '{}', '', 1, 100, 1, 1, 0, 1.0, '{}', '{}');
+
+INSERT INTO provider_oauth_limit_snapshots(
+  provider_id,
+  limit_short_label,
+  limit_5h_text,
+  limit_weekly_text,
+  limit_5h_reset_at,
+  limit_weekly_reset_at,
+  checked_at,
+  updated_at
+) VALUES (1, '5h', '25%', '80%', 10, 20, 30, 30);
+
+PRAGMA user_version = 32;
+"#,
+    )
+    .expect("create legacy snapshot schema");
+
+    assert!(!test_has_column(
+        &conn,
+        "provider_oauth_limit_snapshots",
+        "reset_credit_available_count"
+    ));
+
+    apply_migrations(&mut conn).expect("apply migrations");
+
+    assert!(test_has_column(
+        &conn,
+        "provider_oauth_limit_snapshots",
+        "reset_credit_available_count"
+    ));
+    let row: (String, Option<i64>) = conn
+        .query_row(
+            "SELECT limit_5h_text, reset_credit_available_count FROM provider_oauth_limit_snapshots WHERE provider_id = 1",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("read migrated snapshot");
+    assert_eq!(row, ("25%".to_string(), None));
+
+    apply_migrations(&mut conn).expect("apply migrations twice");
 }
 
 #[test]
@@ -374,6 +883,15 @@ fn test_has_column(conn: &Connection, table: &str, column: &str) -> bool {
     false
 }
 
+fn test_has_table(conn: &Connection, table: &str) -> bool {
+    conn.query_row(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?1 LIMIT 1",
+        [table],
+        |_| Ok(true),
+    )
+    .unwrap_or(false)
+}
+
 fn test_has_index(conn: &Connection, index: &str) -> bool {
     conn.query_row(
         "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?1 LIMIT 1",
@@ -493,7 +1011,7 @@ INSERT INTO providers(
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 32);
+    assert_eq!(user_version, LATEST_SCHEMA_VERSION);
 
     for column in [
         "auth_mode",
@@ -749,7 +1267,7 @@ INSERT INTO skills(
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 32);
+    assert_eq!(user_version, LATEST_SCHEMA_VERSION);
 
     assert!(test_has_column(&conn, "workspaces", "cli_key"));
     assert!(test_has_column(&conn, "workspace_active", "workspace_id"));
@@ -764,6 +1282,7 @@ INSERT INTO skills(
     assert!(test_has_column(&conn, "providers", "limit_weekly_usd"));
     assert!(test_has_column(&conn, "providers", "limit_monthly_usd"));
     assert!(test_has_column(&conn, "providers", "limit_total_usd"));
+    assert!(test_has_column(&conn, "skills", "installed_content_hash"));
 
     let claude_default_ws_id: i64 = conn
         .query_row(
@@ -869,7 +1388,7 @@ fn baseline_v25_creates_complete_schema_for_fresh_install() {
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 32);
+    assert_eq!(user_version, LATEST_SCHEMA_VERSION);
 
     // Verify all tables exist
     let tables: Vec<String> = {
@@ -888,10 +1407,15 @@ fn baseline_v25_creates_complete_schema_for_fresh_install() {
     assert!(tables.contains(&"skills".to_string()));
     assert!(tables.contains(&"skill_repos".to_string()));
     assert!(tables.contains(&"model_prices".to_string()));
+    assert!(tables.contains(&"provider_pool_order".to_string()));
+    assert!(tables.contains(&"default_route_providers".to_string()));
     assert!(tables.contains(&"sort_modes".to_string()));
     assert!(tables.contains(&"sort_mode_providers".to_string()));
     assert!(tables.contains(&"sort_mode_active".to_string()));
     assert!(tables.contains(&"claude_model_validation_runs".to_string()));
+    assert!(tables.contains(&"image_gen_configs".to_string()));
+    assert!(tables.contains(&"image_gen_tasks".to_string()));
+    assert!(tables.contains(&"plugin_hook_execution_reports".to_string()));
     assert!(tables.contains(&"schema_migrations".to_string()));
 
     // Tables from ensure patches
@@ -904,6 +1428,8 @@ fn baseline_v25_creates_complete_schema_for_fresh_install() {
     assert!(test_has_column(&conn, "providers", "limit_5h_usd"));
     assert!(test_has_column(&conn, "providers", "limit_daily_usd"));
     assert!(test_has_column(&conn, "providers", "tags_json"));
+    assert!(test_has_column(&conn, "skills", "installed_commit"));
+    assert!(test_has_column(&conn, "skills", "installed_content_hash"));
 
     // Verify v25->v26 migration ran (claude_models_json)
     assert!(test_has_column(&conn, "providers", "claude_models_json"));
@@ -932,6 +1458,179 @@ fn baseline_v25_creates_complete_schema_for_fresh_install() {
 
     // Idempotent: second run should succeed
     apply_migrations(&mut conn).expect("apply migrations twice");
+}
+
+#[test]
+fn ensure_patches_seed_grok_workspace_once_without_resetting_active_workspace() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    conn.execute_batch("PRAGMA foreign_keys = ON;")
+        .expect("enable foreign_keys");
+
+    apply_migrations(&mut conn).expect("apply migrations on fresh db");
+
+    let default_id: i64 = conn
+        .query_row(
+            "SELECT id FROM workspaces WHERE cli_key = 'grok' AND name = '默认'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read Grok default workspace");
+    let initial_active_id: i64 = conn
+        .query_row(
+            "SELECT workspace_id FROM workspace_active WHERE cli_key = 'grok'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read Grok active workspace");
+    assert_eq!(initial_active_id, default_id);
+
+    conn.execute(
+        "INSERT INTO workspaces(cli_key, name, normalized_name, created_at, updated_at) VALUES ('grok', 'Custom', 'custom', 1, 1)",
+        [],
+    )
+    .expect("insert custom Grok workspace");
+    let custom_id = conn.last_insert_rowid();
+    conn.execute(
+        "UPDATE workspace_active SET workspace_id = ?1, updated_at = 2 WHERE cli_key = 'grok'",
+        [custom_id],
+    )
+    .expect("activate custom Grok workspace");
+
+    apply_migrations(&mut conn).expect("apply migrations twice");
+
+    let default_count: i64 = conn
+        .query_row(
+            "SELECT COUNT(1) FROM workspaces WHERE cli_key = 'grok' AND name = '默认'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count Grok default workspaces");
+    let active_id: i64 = conn
+        .query_row(
+            "SELECT workspace_id FROM workspace_active WHERE cli_key = 'grok'",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read preserved Grok active workspace");
+
+    assert_eq!(default_count, 1);
+    assert_eq!(active_id, custom_id);
+}
+
+#[test]
+fn migrate_v35_to_v36_creates_image_gen_configs_and_is_idempotent() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+
+    v35_to_v36::migrate_v35_to_v36(&mut conn).expect("migrate v35->v36");
+
+    assert!(test_has_table(&conn, "image_gen_configs"));
+    for column in [
+        "adapter_id",
+        "base_url",
+        "api_key_plaintext",
+        "model",
+        "created_at",
+        "updated_at",
+    ] {
+        assert!(
+            test_has_column(&conn, "image_gen_configs", column),
+            "missing image_gen_configs column: {column}"
+        );
+    }
+
+    let user_version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read user_version");
+    assert_eq!(user_version, 36);
+
+    // Idempotent: second run should succeed.
+    v35_to_v36::migrate_v35_to_v36(&mut conn).expect("migrate v35->v36 twice");
+}
+
+#[test]
+fn apply_migrations_upgrades_v35_schema_to_v36() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    apply_migrations(&mut conn).expect("create current schema");
+
+    // Simulate a v35 database (before image_gen_configs existed).
+    conn.execute_batch(
+        r#"
+DROP TABLE image_gen_configs;
+PRAGMA user_version = 35;
+"#,
+    )
+    .expect("simulate v35 schema");
+    assert!(!test_has_table(&conn, "image_gen_configs"));
+
+    apply_migrations(&mut conn).expect("apply migrations from v35");
+
+    assert!(test_has_table(&conn, "image_gen_configs"));
+    let user_version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read user_version");
+    assert_eq!(user_version, LATEST_SCHEMA_VERSION);
+}
+
+#[test]
+fn migrate_v36_to_v37_creates_image_gen_tasks_and_is_idempotent() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+
+    v36_to_v37::migrate_v36_to_v37(&mut conn).expect("migrate v36->v37");
+
+    assert!(test_has_table(&conn, "image_gen_tasks"));
+    for column in [
+        "id",
+        "adapter_id",
+        "prompt",
+        "request_json",
+        "status",
+        "error",
+        "usage_json",
+        "images_json",
+        "ref_images_json",
+        "dir",
+        "created_at",
+        "elapsed_ms",
+    ] {
+        assert!(
+            test_has_column(&conn, "image_gen_tasks", column),
+            "missing image_gen_tasks column: {column}"
+        );
+    }
+    assert!(test_has_index(&conn, "idx_image_gen_tasks_created"));
+
+    let user_version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read user_version");
+    assert_eq!(user_version, 37);
+
+    // Idempotent: second run should succeed.
+    v36_to_v37::migrate_v36_to_v37(&mut conn).expect("migrate v36->v37 twice");
+}
+
+#[test]
+fn apply_migrations_upgrades_v36_schema_to_v37() {
+    let mut conn = Connection::open_in_memory().expect("open in-memory sqlite");
+    apply_migrations(&mut conn).expect("create current schema");
+
+    // Simulate a v36 database (before image_gen_tasks existed).
+    conn.execute_batch(
+        r#"
+DROP TABLE image_gen_tasks;
+PRAGMA user_version = 36;
+"#,
+    )
+    .expect("simulate v36 schema");
+    assert!(!test_has_table(&conn, "image_gen_tasks"));
+
+    apply_migrations(&mut conn).expect("apply migrations from v36");
+
+    assert!(test_has_table(&conn, "image_gen_tasks"));
+    assert!(test_has_index(&conn, "idx_image_gen_tasks_created"));
+    let user_version: i64 = conn
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .expect("read user_version");
+    assert_eq!(user_version, LATEST_SCHEMA_VERSION);
 }
 
 #[test]
@@ -1100,7 +1799,7 @@ PRAGMA user_version = 33;
     let user_version: i64 = conn
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .expect("read user_version");
-    assert_eq!(user_version, 32);
+    assert_eq!(user_version, LATEST_SCHEMA_VERSION);
 
     assert!(test_has_column(&conn, "providers", "limit_5h_usd"));
     assert!(test_has_column(&conn, "providers", "limit_daily_usd"));
@@ -1109,6 +1808,8 @@ PRAGMA user_version = 33;
     assert!(test_has_column(&conn, "providers", "limit_weekly_usd"));
     assert!(test_has_column(&conn, "providers", "limit_monthly_usd"));
     assert!(test_has_column(&conn, "providers", "limit_total_usd"));
+    assert!(test_has_column(&conn, "skills", "installed_content_hash"));
+    assert!(test_has_table(&conn, "plugin_hook_execution_reports"));
 
     let active_id: i64 = conn
         .query_row(

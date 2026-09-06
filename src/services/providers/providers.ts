@@ -5,9 +5,22 @@ import {
   type ProviderAuthMode as GeneratedProviderAuthMode,
   type ProviderAvailabilityResult,
   type ProviderBaseUrlMode as GeneratedProviderBaseUrlMode,
+  type ProviderExtensionValuesInput,
+  type ProviderModelMode as GeneratedProviderModelMode,
+  type ProviderModelPolicyStatus as GeneratedProviderModelPolicyStatus,
+  type ProviderModelPolicyV1 as GeneratedProviderModelPolicyV1,
+  type ProviderModelMapping as GeneratedProviderModelMapping,
+  type ProviderModelDiscoveryErrorCode as GeneratedProviderModelDiscoveryErrorCode,
+  type ProviderModelDiscoveryInput as GeneratedProviderModelDiscoveryInput,
+  type ProviderModelDiscoveryResult as GeneratedProviderModelDiscoveryResult,
+  type ProviderModelDiscoveryUnsupportedReason as GeneratedProviderModelDiscoveryUnsupportedReason,
+  type ProviderOAuthDeviceCodeCancelResult as GeneratedProviderOAuthDeviceCodeCancelResult,
+  type ProviderOAuthDeviceCodePollResult as GeneratedProviderOAuthDeviceCodePollResult,
+  type ProviderOAuthDeviceCodeStartResult as GeneratedProviderOAuthDeviceCodeStartResult,
   type ProviderOAuthDisconnectResult,
   type ProviderOAuthLimitsResult,
   type ProviderOAuthRefreshResult,
+  type ProviderOAuthResetCodexQuotaResult,
   type ProviderOAuthStartFlowResult,
   type ProviderOAuthStatusResult,
   type ProviderSummary as GeneratedProviderSummary,
@@ -25,24 +38,42 @@ import {
   type Override,
 } from "../generatedTypeUtils";
 import { createRiskyIpcConfirm } from "../ipcConfirm";
+import { FeValidationError } from "../../utils/errors";
+import { CLI_KEYS, type CliKey } from "../../constants/clis";
 
 export type {
   ProviderAvailabilityResult,
+  ProviderExtensionValuesInput,
+  GeneratedProviderOAuthDeviceCodePollResult as ProviderOAuthDeviceCodePollResult,
+  GeneratedProviderOAuthDeviceCodeStartResult as ProviderOAuthDeviceCodeStartResult,
+  GeneratedProviderOAuthDeviceCodeCancelResult as ProviderOAuthDeviceCodeCancelResult,
   ProviderOAuthDisconnectResult,
   ProviderOAuthLimitsResult,
   ProviderOAuthRefreshResult,
+  ProviderOAuthResetCodexQuotaResult,
   ProviderOAuthStartFlowResult,
   ProviderOAuthStatusResult,
 };
 
-export type CliKey = "claude" | "codex" | "gemini";
+export type { CliKey } from "../../constants/clis";
 
 export type ClaudeModels = GeneratedClaudeModels;
 export type DailyResetMode = GeneratedDailyResetMode;
 export type ProviderAuthMode = GeneratedProviderAuthMode;
 export type ProviderBaseUrlMode = GeneratedProviderBaseUrlMode;
+export type ProviderModelMode = GeneratedProviderModelMode;
+export type ProviderModelPolicyStatus = GeneratedProviderModelPolicyStatus;
+export type ProviderModelPolicyV1 = GeneratedProviderModelPolicyV1;
+export type ProviderModelMapping = GeneratedProviderModelMapping;
+export type ProviderModelDiscoveryErrorCode = GeneratedProviderModelDiscoveryErrorCode;
+export type ProviderModelDiscoveryResult = GeneratedProviderModelDiscoveryResult;
+export type ProviderModelDiscoveryUnsupportedReason =
+  GeneratedProviderModelDiscoveryUnsupportedReason;
+export type ProviderModelDiscoveryInput = Omit<GeneratedProviderModelDiscoveryInput, "cliKey"> & {
+  cliKey: CliKey;
+};
 
-const CLI_KEY_VALUES = ["claude", "codex", "gemini"] as const satisfies readonly CliKey[];
+const CLI_KEY_VALUES = CLI_KEYS;
 const PROVIDER_AUTH_MODE_VALUES = [
   "api_key",
   "oauth",
@@ -57,6 +88,16 @@ export type ProviderSummary = Override<
   }
 >;
 
+export type ProviderRouteRow = {
+  provider_id: number;
+};
+
+type ProviderDeleteCommandArgs = Parameters<typeof commands.providerDelete>;
+
+export type ProviderDeleteOptions = {
+  clearUsageStats?: ProviderDeleteCommandArgs[1] | null;
+};
+
 type ProviderUpsertFieldMap = {
   providerId: "providerId";
   cliKey: "cliKey";
@@ -69,6 +110,7 @@ type ProviderUpsertFieldMap = {
   costMultiplier: "costMultiplier";
   priority: "priority";
   claudeModels: "claudeModels";
+  modelPolicy: "modelPolicy";
   limit5hUsd: "limit5hUsd";
   limitDailyUsd: "limitDailyUsd";
   dailyResetMode: "dailyResetMode";
@@ -81,6 +123,7 @@ type ProviderUpsertFieldMap = {
   sourceProviderId: "sourceProviderId";
   bridgeType: "bridgeType";
   streamIdleTimeoutSeconds: "streamIdleTimeoutSeconds";
+  extensionValues: "extensionValues";
 };
 
 type ProviderUpsertAuthority = RemapGeneratedKeys<
@@ -116,7 +159,7 @@ export function validateProviderCliKey(cliKey: string): CliKey {
   if ((CLI_KEY_VALUES as readonly string[]).includes(normalizedCliKey)) {
     return normalizedCliKey as CliKey;
   }
-  throw new Error(`SEC_INVALID_INPUT: invalid cliKey=${cliKey}`);
+  throw new FeValidationError(`SEC_INVALID_INPUT: invalid cliKey=${cliKey}`);
 }
 
 function toProviderAuthMode(value: string, label: string): ProviderAuthMode {
@@ -158,6 +201,7 @@ function toProviderUpsertPayload(input: ProviderUpsertInput): ProviderUpsertTran
     costMultiplier: input.costMultiplier,
     priority: input.priority ?? null,
     claudeModels: input.claudeModels ?? null,
+    modelPolicy: input.modelPolicy ?? null,
     limit5hUsd: input.limit5hUsd ?? null,
     limitDailyUsd: input.limitDailyUsd ?? null,
     dailyResetMode: input.dailyResetMode ?? null,
@@ -169,6 +213,7 @@ function toProviderUpsertPayload(input: ProviderUpsertInput): ProviderUpsertTran
     note: input.note ?? null,
     sourceProviderId,
     bridgeType: input.bridgeType ?? null,
+    extensionValues: input.extensionValues ?? null,
   } satisfies Omit<GeneratedProviderUpsertInput, "streamIdleTimeoutSeconds">;
 
   if (Object.prototype.hasOwnProperty.call(input, "streamIdleTimeoutSeconds")) {
@@ -209,6 +254,24 @@ export async function providersList(cliKey: CliKey) {
       mapGeneratedCommandResponse(await commands.providersList(normalizedCliKey), (rows) =>
         rows.map(toProviderSummary)
       ),
+  });
+}
+
+export async function providerModelsDiscover(input: ProviderModelDiscoveryInput) {
+  const payload = {
+    ...input,
+    providerId: input.providerId == null ? null : validateProviderId(input.providerId),
+    cliKey: validateProviderCliKey(input.cliKey),
+  } satisfies GeneratedProviderModelDiscoveryInput;
+
+  return invokeGeneratedIpc<ProviderModelDiscoveryResult>({
+    title: "获取上游模型失败",
+    cmd: "provider_models_discover",
+    args: { input: payload },
+    invoke: () =>
+      commands.providerModelsDiscover(payload) as Promise<
+        GeneratedCommandResult<ProviderModelDiscoveryResult>
+      >,
   });
 }
 
@@ -258,15 +321,18 @@ export async function providerSetEnabled(
   });
 }
 
-export async function providerDelete(providerId: number) {
+export async function providerDelete(providerId: number, options: ProviderDeleteOptions = {}) {
   const normalizedProviderId = validateProviderId(providerId);
+  const clearUsageStats = options.clearUsageStats === true;
 
   return invokeGeneratedIpc<boolean>({
     title: "删除供应商失败",
     cmd: "provider_delete",
-    args: { providerId: normalizedProviderId },
+    args: { providerId: normalizedProviderId, clearUsageStats },
     invoke: () =>
-      commands.providerDelete(normalizedProviderId) as Promise<GeneratedCommandResult<boolean>>,
+      commands.providerDelete(normalizedProviderId, clearUsageStats) as Promise<
+        GeneratedCommandResult<boolean>
+      >,
   });
 }
 
@@ -286,6 +352,35 @@ export async function providersReorder(
         await commands.providersReorder(normalizedCliKey, orderedProviderIds),
         (rows) => rows.map(toProviderSummary)
       ),
+  });
+}
+
+export async function defaultRouteProvidersList(cliKey: CliKey) {
+  const normalizedCliKey = validateProviderCliKey(cliKey);
+
+  return invokeGeneratedIpc<ProviderRouteRow[]>({
+    title: "读取 Default 调用顺序失败",
+    cmd: "default_route_providers_list",
+    args: { cliKey: normalizedCliKey },
+    invoke: () =>
+      commands.defaultRouteProvidersList(normalizedCliKey) as Promise<
+        GeneratedCommandResult<ProviderRouteRow[]>
+      >,
+  });
+}
+
+export async function defaultRouteProvidersSetOrder(cliKey: CliKey, orderedProviderIds: number[]) {
+  const normalizedCliKey = validateProviderCliKey(cliKey);
+  validateOrderedProviderIds(orderedProviderIds);
+
+  return invokeGeneratedIpc<ProviderRouteRow[]>({
+    title: "更新 Default 调用顺序失败",
+    cmd: "default_route_providers_set_order",
+    args: { cliKey: normalizedCliKey, orderedProviderIds },
+    invoke: () =>
+      commands.defaultRouteProvidersSetOrder(normalizedCliKey, orderedProviderIds) as Promise<
+        GeneratedCommandResult<ProviderRouteRow[]>
+      >,
   });
 }
 
@@ -349,6 +444,64 @@ export async function providerOAuthStartFlow(
     invoke: () =>
       commands.providerOauthStartFlow(normalizedCliKey, normalizedProviderId) as Promise<
         GeneratedCommandResult<ProviderOAuthStartFlowResult>
+      >,
+  });
+}
+
+export async function providerOAuthStartDeviceFlow(
+  providerId: number
+): Promise<GeneratedProviderOAuthDeviceCodeStartResult> {
+  const normalizedProviderId = validateProviderId(providerId);
+
+  return invokeGeneratedIpc<GeneratedProviderOAuthDeviceCodeStartResult>({
+    title: "启动设备码登录失败",
+    cmd: "provider_oauth_start_device_flow",
+    args: { providerId: normalizedProviderId },
+    invoke: () =>
+      commands.providerOauthStartDeviceFlow(normalizedProviderId) as Promise<
+        GeneratedCommandResult<GeneratedProviderOAuthDeviceCodeStartResult>
+      >,
+  });
+}
+
+export async function providerOAuthPollDeviceFlow(
+  providerId: number,
+  flowId: string,
+  deviceCode: string,
+  userCode: string
+): Promise<GeneratedProviderOAuthDeviceCodePollResult> {
+  const normalizedProviderId = validateProviderId(providerId);
+  const normalizedFlowId = flowId.trim();
+  if (!normalizedFlowId) {
+    throw new Error("SEC_INVALID_INPUT: invalid flowId");
+  }
+
+  return invokeGeneratedIpc<GeneratedProviderOAuthDeviceCodePollResult>({
+    title: "轮询设备码登录失败",
+    cmd: "provider_oauth_poll_device_flow",
+    args: { providerId: normalizedProviderId, flowId: normalizedFlowId, deviceCode, userCode },
+    invoke: () =>
+      commands.providerOauthPollDeviceFlow({
+        providerId: normalizedProviderId,
+        flowId: normalizedFlowId,
+        deviceCode,
+        userCode,
+      }) as Promise<GeneratedCommandResult<GeneratedProviderOAuthDeviceCodePollResult>>,
+  });
+}
+
+export async function providerOAuthCancelDeviceFlow(
+  flowId: string
+): Promise<GeneratedProviderOAuthDeviceCodeCancelResult> {
+  const normalizedFlowId = flowId.trim();
+
+  return invokeGeneratedIpc<GeneratedProviderOAuthDeviceCodeCancelResult>({
+    title: "取消设备码登录失败",
+    cmd: "provider_oauth_cancel_device_flow",
+    args: { flowId: normalizedFlowId },
+    invoke: () =>
+      commands.providerOauthCancelDeviceFlow(normalizedFlowId) as Promise<
+        GeneratedCommandResult<GeneratedProviderOAuthDeviceCodeCancelResult>
       >,
   });
 }
@@ -449,17 +602,41 @@ export async function providerOAuthFetchLimits(
   });
 }
 
-export async function providerTestAvailability(
+export async function providerOAuthResetCodexQuota(
   providerId: number
+): Promise<ProviderOAuthResetCodexQuotaResult> {
+  const normalizedProviderId = validateProviderId(providerId);
+  const confirm = createRiskyIpcConfirm(
+    "provider_oauth_reset_codex_quota",
+    `provider:${normalizedProviderId}:codex_reset_credit`
+  );
+
+  return invokeGeneratedIpc<ProviderOAuthResetCodexQuotaResult>({
+    title: "重置 Codex OAuth 额度失败",
+    cmd: "provider_oauth_reset_codex_quota",
+    args: { providerId: normalizedProviderId, confirm },
+    invoke: () =>
+      commands.providerOauthResetCodexQuota(normalizedProviderId, confirm) as Promise<
+        GeneratedCommandResult<ProviderOAuthResetCodexQuotaResult>
+      >,
+  });
+}
+
+export async function providerTestAvailability(
+  providerId: number,
+  options?: { model?: string | null; prompt?: string | null }
 ): Promise<ProviderAvailabilityResult | null> {
   const normalizedProviderId = validateProviderId(providerId);
+  // Blank input means "let the backend decide" (policy model / default prompt).
+  const model = options?.model?.trim() || null;
+  const prompt = options?.prompt?.trim() || null;
 
   return invokeGeneratedIpc<ProviderAvailabilityResult>({
     title: "测试供应商可用性失败",
     cmd: "provider_test_availability",
-    args: { providerId: normalizedProviderId },
+    args: { providerId: normalizedProviderId, model, prompt },
     invoke: () =>
-      commands.providerTestAvailability(normalizedProviderId) as Promise<
+      commands.providerTestAvailability(normalizedProviderId, model, prompt) as Promise<
         GeneratedCommandResult<ProviderAvailabilityResult>
       >,
   });

@@ -15,12 +15,6 @@ vi.mock("../providers/ProvidersView", () => ({
   ),
 }));
 
-vi.mock("../providers/SortModesView", () => ({
-  SortModesView: ({ activeCli }: any) => (
-    <div data-testid="sort-modes-view">sort-modes:{activeCli}</div>
-  ),
-}));
-
 vi.mock("../../query/providers", async () => {
   const actual =
     await vi.importActual<typeof import("../../query/providers")>("../../query/providers");
@@ -43,7 +37,7 @@ function renderWithProviders(element: ReactElement) {
 }
 
 describe("pages/ProvidersPage", () => {
-  it("uses top tabs to switch CLI providers view and sort modes view", () => {
+  it("uses top tabs to switch CLI providers view", () => {
     vi.mocked(useSettingsQuery).mockReturnValue({
       data: createTestAppSettings({ cli_priority_order: ["codex", "claude", "gemini"] }),
     } as any);
@@ -60,20 +54,14 @@ describe("pages/ProvidersPage", () => {
 
     expect(screen.getAllByRole("tab").map((tab) => tab.textContent)).toEqual([
       "Codex",
-      "Claude Code",
+      "Claude",
       "Gemini",
-      "排序模板",
+      "Grok",
     ]);
 
-    fireEvent.click(screen.getByRole("tab", { name: "Claude Code" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Claude" }));
 
     expect(screen.getByRole("heading", { level: 1, name: "供应商" })).toBeInTheDocument();
     expect(screen.getByText("providers:claude")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("tab", { name: "排序模板" }));
-
-    expect(screen.getByRole("heading", { level: 1, name: "排序模板" })).toBeInTheDocument();
-    expect(screen.getByTestId("sort-modes-view")).toBeInTheDocument();
-    expect(screen.getByText("sort-modes:claude")).toBeInTheDocument();
   });
 });

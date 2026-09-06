@@ -1,10 +1,11 @@
 import { useEffect, useRef } from "react";
 import { toast } from "sonner";
-import { FREE_TAG } from "../../constants/providers";
 import { logToConsole } from "../../services/consoleLog";
 import {
   type ProviderOAuthStatusResult,
   type ClaudeModels,
+  type ProviderModelPolicyStatus,
+  type ProviderModelPolicyV1,
   type ProviderSummary,
 } from "../../services/providers/providers";
 import type { GatewayStatus } from "../../services/gateway/gateway";
@@ -12,18 +13,17 @@ import type { AppSettings } from "../../services/settings/settings";
 import type { ProviderEditorDialogFormInput } from "../../schemas/providerEditorDialog";
 import type { BaseUrlRow, ProviderBaseUrlMode } from "./types";
 import type { ProviderEditorInitialValues } from "./providerDuplicate";
-import type { UseFormReset, UseFormSetValue } from "react-hook-form";
+import type { UseFormReset } from "react-hook-form";
 import {
   valueOrEmpty,
-  isZeroMultiplier,
-  isNonZeroMultiplier,
-  moveFreeTagToFront,
-  areTagsEqual,
+  normalizeTagsForCostMultiplier,
   buildFormValues,
   buildBaseUrlRows,
   deriveAuthMode,
   deriveCx2ccSourceValue,
+  withCx2ccDefaultModel,
 } from "./providerEditorUtils";
+import { cloneProviderModelPolicy, DEFAULT_PROVIDER_MODEL_POLICY } from "./providerModelPolicy";
 
 export type EffectDeps = {
   open: boolean;
@@ -33,19 +33,18 @@ export type EffectDeps = {
   editingProviderId: number | null;
   createInitialValues: ProviderEditorInitialValues | null;
   authMode: "api_key" | "oauth" | "cx2cc";
-  costMultiplierValue: string;
-  isCodexGatewaySource: boolean;
-  selectedCx2ccSourceProvider: ProviderSummary | null;
   reset: UseFormReset<ProviderEditorDialogFormInput>;
-  setValue: UseFormSetValue<ProviderEditorDialogFormInput>;
   editProviderSnapshotRef: React.MutableRefObject<ProviderSummary | null>;
   baseUrlRowSeqRef: React.MutableRefObject<number>;
-  oauthStatusRequestSeqRef: React.MutableRefObject<number>;
+  cancelActiveOAuthLoginAttempt: (resetUi?: boolean) => void;
   newBaseUrlRow: (url?: string) => BaseUrlRow;
   setBaseUrlMode: (v: ProviderBaseUrlMode) => void;
   setBaseUrlRows: (v: BaseUrlRow[]) => void;
   setPingingAll: (v: boolean) => void;
   setClaudeModels: (v: ClaudeModels) => void;
+  setModelPolicy: (v: ProviderModelPolicyV1 | null) => void;
+  setModelPolicyStatus: (v: ProviderModelPolicyStatus) => void;
+  setModelPolicyDirty: (v: boolean) => void;
   setTags: React.Dispatch<React.SetStateAction<string[]>>;
   setTagInput: (v: string) => void;
   setStreamIdleTimeoutSeconds: (v: string) => void;
@@ -77,19 +76,18 @@ export function useProviderEditorEffects(d: EffectDeps) {
     editingProviderId,
     createInitialValues,
     authMode,
-    costMultiplierValue,
-    isCodexGatewaySource,
-    selectedCx2ccSourceProvider,
     reset,
-    setValue,
     editProviderSnapshotRef,
     baseUrlRowSeqRef,
-    oauthStatusRequestSeqRef,
+    cancelActiveOAuthLoginAttempt,
     newBaseUrlRow,
     setBaseUrlMode,
     setBaseUrlRows,
     setPingingAll,
     setClaudeModels,
+    setModelPolicy,
+    setModelPolicyStatus,
+    setModelPolicyDirty,
     setTags,
     setTagInput,
     setStreamIdleTimeoutSeconds,
@@ -115,11 +113,14 @@ export function useProviderEditorEffects(d: EffectDeps) {
     setOauthLoading(false);
 
     if (!open) {
+      cancelActiveOAuthLoginAttempt();
       setOauthStatus(null);
       return () => {
-        oauthStatusRequestSeqRef.current += 1;
+        cancelActiveOAuthLoginAttempt(false);
       };
     }
+
+    cancelActiveOAuthLoginAttempt();
 
     baseUrlRowSeqRef.current = 1;
 
@@ -127,33 +128,65 @@ export function useProviderEditorEffects(d: EffectDeps) {
       setBaseUrlMode(createInitialValues?.base_url_mode ?? "order");
       setBaseUrlRows(buildBaseUrlRows(createInitialValues, newBaseUrlRow));
       setPingingAll(false);
-      setClaudeModels(createInitialValues?.claude_models ?? {});
-      setTags(createInitialValues?.tags ?? []);
+      const initialCx2ccSourceValue = deriveCx2ccSourceValue(createInitialValues);
+      setClaudeModels(
+        initialCx2ccSourceValue
+          ? withCx2ccDefaultModel(createInitialValues?.claude_models ?? {})
+          : (createInitialValues?.claude_models ?? {})
+      );
+      setModelPolicy(cloneProviderModelPolicy(DEFAULT_PROVIDER_MODEL_POLICY));
+      setModelPolicyStatus("ready");
+      setModelPolicyDirty(false);
+      setTags(
+        normalizeTagsForCostMultiplier(
+          createInitialValues?.tags ?? [],
+          String(createInitialValues?.cost_multiplier ?? 1.0)
+        )
+      );
       setTagInput("");
       setStreamIdleTimeoutSeconds(valueOrEmpty(createInitialValues?.stream_idle_timeout_seconds));
-      setCx2ccSourceValue(deriveCx2ccSourceValue(createInitialValues));
+      setCx2ccSourceValue(initialCx2ccSourceValue);
       setAuthMode(
-        deriveCx2ccSourceValue(createInitialValues)
-          ? "cx2cc"
-          : (createInitialValues?.auth_mode ?? "api_key")
+        initialCx2ccSourceValue ? "cx2cc" : (createInitialValues?.auth_mode ?? "api_key")
       );
       setOauthStatus(null);
       reset(buildFormValues(createInitialValues));
-      return;
+      return () => {
+        cancelActiveOAuthLoginAttempt(false);
+      };
     }
 
     const snapshot = editProviderSnapshotRef.current;
-    if (!snapshot) return;
+    if (!snapshot) {
+      return () => {
+        cancelActiveOAuthLoginAttempt(false);
+      };
+    }
 
     const initialAuthMode = deriveAuthMode(snapshot);
+    const initialCx2ccSourceValue = deriveCx2ccSourceValue(snapshot);
+    const initialModelPolicyStatus: ProviderModelPolicyStatus = snapshot.model_policy_status;
     setAuthMode(initialAuthMode);
-    setCx2ccSourceValue(deriveCx2ccSourceValue(snapshot));
+    setCx2ccSourceValue(initialCx2ccSourceValue);
     setOauthStatus(null);
     setBaseUrlMode(snapshot.base_url_mode);
     setBaseUrlRows(snapshot.base_urls.map((url) => newBaseUrlRow(url)));
     setPingingAll(false);
-    setClaudeModels(snapshot.claude_models ?? {});
-    setTags(snapshot.tags ?? []);
+    setClaudeModels(
+      initialAuthMode === "cx2cc"
+        ? withCx2ccDefaultModel(snapshot.claude_models ?? {})
+        : (snapshot.claude_models ?? {})
+    );
+    setModelPolicy(
+      initialModelPolicyStatus === "ready"
+        ? (snapshot.model_policy ?? cloneProviderModelPolicy(DEFAULT_PROVIDER_MODEL_POLICY))
+        : null
+    );
+    setModelPolicyStatus(initialModelPolicyStatus);
+    setModelPolicyDirty(false);
+    setTags(
+      normalizeTagsForCostMultiplier(snapshot.tags ?? [], String(snapshot.cost_multiplier ?? 1.0))
+    );
     setTagInput("");
     setStreamIdleTimeoutSeconds(valueOrEmpty(snapshot.stream_idle_timeout_seconds));
     reset({
@@ -173,23 +206,26 @@ export function useProviderEditorEffects(d: EffectDeps) {
       note: snapshot.note ?? "",
     });
     return () => {
-      oauthStatusRequestSeqRef.current += 1;
+      cancelActiveOAuthLoginAttempt(false);
     };
   }, [
     baseUrlRowSeqRef,
+    cancelActiveOAuthLoginAttempt,
     cliKey,
     createInitialValues,
     editProviderSnapshotRef,
     editingProviderId,
     mode,
     newBaseUrlRow,
-    oauthStatusRequestSeqRef,
     open,
     reset,
     setAuthMode,
     setBaseUrlMode,
     setBaseUrlRows,
     setClaudeModels,
+    setModelPolicy,
+    setModelPolicyDirty,
+    setModelPolicyStatus,
     setCx2ccSourceValue,
     setOauthLoading,
     setOauthStatus,
@@ -200,17 +236,9 @@ export function useProviderEditorEffects(d: EffectDeps) {
   ]);
 
   useEffect(() => {
-    if (authMode !== "cx2cc") return;
-    const inheritedMultiplier = isCodexGatewaySource
-      ? "0"
-      : String(selectedCx2ccSourceProvider?.cost_multiplier ?? 1.0);
-    if (Number(costMultiplierValue) === Number(inheritedMultiplier)) return;
-    setValue("cost_multiplier", inheritedMultiplier, {
-      shouldDirty: true,
-      shouldTouch: false,
-      shouldValidate: false,
-    });
-  }, [authMode, costMultiplierValue, isCodexGatewaySource, selectedCx2ccSourceProvider, setValue]);
+    if (!open || authMode === "oauth") return;
+    cancelActiveOAuthLoginAttempt();
+  }, [authMode, cancelActiveOAuthLoginAttempt, open]);
 
   useEffect(() => {
     if (!open || cliKey !== "claude") return;
@@ -239,25 +267,6 @@ export function useProviderEditorEffects(d: EffectDeps) {
     setCx2ccFallbackModels,
     settingsSnapshot,
   ]);
-
-  useEffect(() => {
-    if (!open) return;
-
-    setTags((prev) => {
-      const hasFreeTag = prev.includes(FREE_TAG);
-
-      if (isZeroMultiplier(costMultiplierValue)) {
-        const next = hasFreeTag ? moveFreeTagToFront(prev) : [FREE_TAG, ...prev];
-        return areTagsEqual(prev, next) ? prev : next;
-      }
-
-      if (isNonZeroMultiplier(costMultiplierValue) && hasFreeTag) {
-        return prev.filter((tag) => tag !== FREE_TAG);
-      }
-
-      return prev;
-    });
-  }, [costMultiplierValue, open, setTags]);
 
   useEffect(() => {
     if (!open || editProvider?.auth_mode !== "oauth") return;

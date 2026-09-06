@@ -17,6 +17,12 @@ export type ClaudeOAuthCardProps = {
 };
 
 type OAuthStatus = NonNullable<Awaited<ReturnType<typeof providerOAuthStatus>>>;
+type OAuthStatusState = {
+  providerKey: string;
+  status: OAuthStatus | null;
+  statusLoading: boolean;
+  statusError: string | null;
+};
 
 function buildInitialStatus(provider: ProviderSummary): OAuthStatus {
   return {
@@ -34,6 +40,27 @@ function formatExpiresAt(expiresAt: number | null | undefined) {
   return new Date(ts).toLocaleString("zh-CN", { hour12: false });
 }
 
+function buildProviderKey(provider: ProviderSummary | null) {
+  if (!provider) return "none";
+  return [
+    provider.id,
+    provider.oauth_provider_type ?? "",
+    provider.oauth_email ?? "",
+    provider.oauth_expires_at ?? "",
+    provider.oauth_last_error ?? "",
+  ].join(":");
+}
+
+function buildStatusState(provider: ProviderSummary | null): OAuthStatusState {
+  const providerKey = buildProviderKey(provider);
+  return {
+    providerKey,
+    status: provider ? buildInitialStatus(provider) : null,
+    statusLoading: Boolean(provider),
+    statusError: null,
+  };
+}
+
 export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
   const oauthProvider = useMemo(
     () =>
@@ -42,52 +69,55 @@ export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
       ) ?? null,
     [providers]
   );
-  const [status, setStatus] = useState<OAuthStatus | null>(
-    oauthProvider ? buildInitialStatus(oauthProvider) : null
-  );
-  const [statusLoading, setStatusLoading] = useState(false);
+  const providerKey = buildProviderKey(oauthProvider);
+  const [statusState, setStatusState] = useState(() => buildStatusState(oauthProvider));
+  let effectiveStatusState = statusState;
+
+  if (statusState.providerKey !== providerKey) {
+    effectiveStatusState = buildStatusState(oauthProvider);
+    setStatusState(effectiveStatusState);
+  }
+
   const [actionLoading, setActionLoading] = useState<"login" | "refresh" | "disconnect" | null>(
     null
   );
-  const [statusError, setStatusError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!oauthProvider) {
-      setStatus(null);
-      setStatusError(null);
-      setStatusLoading(false);
-      return;
-    }
+    if (!oauthProvider) return;
 
     let cancelled = false;
-    setStatus(buildInitialStatus(oauthProvider));
-    setStatusError(null);
-    setStatusLoading(true);
 
-    void providerOAuthStatus(oauthProvider.id)
-      .then((next) => {
-        if (cancelled || !next) return;
-        setStatus(next);
-      })
-      .catch((error) => {
+    void (async () => {
+      try {
+        const next = await providerOAuthStatus(oauthProvider.id);
         if (cancelled) return;
-        setStatusError(error instanceof Error ? error.message : String(error));
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setStatusLoading(false);
-        }
-      });
+        setStatusState((current) =>
+          current.providerKey === providerKey
+            ? { ...current, status: next ?? current.status, statusLoading: false }
+            : current
+        );
+      } catch (error) {
+        if (cancelled) return;
+        setStatusState((current) =>
+          current.providerKey === providerKey
+            ? {
+                ...current,
+                statusError: error instanceof Error ? error.message : String(error),
+                statusLoading: false,
+              }
+            : current
+        );
+      }
+    })();
 
     return () => {
       cancelled = true;
     };
-  }, [oauthProvider]);
+  }, [oauthProvider, providerKey]);
 
   async function reloadStatus(providerId: number) {
     const next = await providerOAuthStatus(providerId);
-    setStatus(next);
-    setStatusError(null);
+    setStatusState((current) => ({ ...current, status: next, statusError: null }));
     return next;
   }
 
@@ -96,10 +126,8 @@ export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
       <Card className="p-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              Claude OAuth
-            </h3>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+            <h3 className="text-sm font-semibold text-foreground">Claude OAuth</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
               请先在供应商页面创建一个 Claude OAuth 供应商
             </p>
           </div>
@@ -115,6 +143,7 @@ export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
   // TypeScript doesn't narrow useMemo results across early returns, so re-bind.
   const provider = oauthProvider;
 
+  const { status, statusLoading, statusError } = effectiveStatusState;
   const connected = status?.connected ?? false;
   const busy = actionLoading !== null;
   const effectiveError = statusError ?? provider.oauth_last_error ?? null;
@@ -161,14 +190,18 @@ export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
         toast.error("断开连接失败");
         return;
       }
-      setStatus({
-        connected: false,
-        provider_type: status?.provider_type ?? provider.oauth_provider_type ?? null,
-        email: null,
-        expires_at: null,
-        has_refresh_token: null,
+      setStatusState({
+        providerKey,
+        status: {
+          connected: false,
+          provider_type: status?.provider_type ?? provider.oauth_provider_type ?? null,
+          email: null,
+          expires_at: null,
+          has_refresh_token: null,
+        },
+        statusLoading: false,
+        statusError: null,
       });
-      setStatusError(null);
       toast.success("已断开 Claude OAuth 连接");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : "断开连接失败");
@@ -182,10 +215,8 @@ export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
       <div className="flex flex-col gap-4">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div>
-            <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">
-              Claude OAuth
-            </h3>
-            <p className="mt-1 text-sm text-slate-600 dark:text-slate-400">
+            <h3 className="text-sm font-semibold text-foreground">Claude OAuth</h3>
+            <p className="mt-1 text-sm text-muted-foreground">
               使用浏览器完成 Claude 官方 OAuth 授权，适用于 OAuth 模式的 Claude 供应商。
             </p>
           </div>
@@ -194,7 +225,7 @@ export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
               "inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 ring-inset",
               connected
                 ? "bg-green-50 text-green-700 ring-green-600/20 dark:bg-green-900/30 dark:text-green-400"
-                : "bg-slate-100 text-slate-600 ring-slate-500/10 dark:bg-slate-700 dark:text-slate-300",
+                : "bg-secondary text-muted-foreground ring-border dark:bg-secondary dark:text-secondary-foreground",
             ].join(" ")}
           >
             {connected ? <ShieldCheck className="h-3 w-3" /> : <ShieldOff className="h-3 w-3" />}
@@ -203,21 +234,19 @@ export function ClaudeOAuthCard({ providers }: ClaudeOAuthCardProps) {
         </div>
 
         <div className="grid gap-3 md:grid-cols-3">
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800">
-            <div className="text-xs text-slate-500 dark:text-slate-400">供应商</div>
-            <div className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
-              {oauthProvider.name}
-            </div>
+          <div className="rounded-lg border border-border bg-secondary p-3 dark:border-border dark:bg-secondary">
+            <div className="text-xs text-muted-foreground">供应商</div>
+            <div className="mt-1 text-sm font-medium text-foreground">{oauthProvider.name}</div>
           </div>
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800">
-            <div className="text-xs text-slate-500 dark:text-slate-400">邮箱</div>
-            <div className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+          <div className="rounded-lg border border-border bg-secondary p-3 dark:border-border dark:bg-secondary">
+            <div className="text-xs text-muted-foreground">邮箱</div>
+            <div className="mt-1 text-sm font-medium text-foreground">
               {connected ? (status?.email ?? "—") : "—"}
             </div>
           </div>
-          <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 dark:border-slate-700 dark:bg-slate-800">
-            <div className="text-xs text-slate-500 dark:text-slate-400">到期时间</div>
-            <div className="mt-1 text-sm font-medium text-slate-900 dark:text-slate-100">
+          <div className="rounded-lg border border-border bg-secondary p-3 dark:border-border dark:bg-secondary">
+            <div className="text-xs text-muted-foreground">到期时间</div>
+            <div className="mt-1 text-sm font-medium text-foreground">
               {connected ? formatExpiresAt(status?.expires_at) : "—"}
             </div>
           </div>

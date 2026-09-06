@@ -539,6 +539,42 @@ mod tests {
         assert_eq!(anthropic_resp["usage"]["output_tokens"], 2);
     }
 
+    #[test]
+    fn acceptance_cx2cc_round_trip_preserves_requested_model_and_usage() {
+        let bridge = get_bridge("cx2cc").unwrap();
+        let ctx = cx2cc_ctx();
+
+        let anthropic_req = json!({
+            "model": "claude-sonnet-4-20250514",
+            "max_tokens": 1024,
+            "messages": [
+                {"role": "user", "content": "Hello"}
+            ]
+        });
+
+        let translated_req = bridge.translate_request(anthropic_req, &ctx).unwrap();
+        assert_eq!(translated_req.target_path, "/v1/responses");
+
+        let openai_resp = json!({
+            "id": "resp_acceptance",
+            "model": translated_req.body["model"],
+            "status": "completed",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "Hi"}]
+                }
+            ],
+            "usage": {"input_tokens": 13, "output_tokens": 5}
+        });
+
+        let anthropic_resp = bridge.translate_response(openai_resp, &ctx).unwrap();
+        assert_eq!(anthropic_resp["model"], "claude-sonnet-4-20250514");
+        assert_eq!(anthropic_resp["usage"]["input_tokens"], 13);
+        assert_eq!(anthropic_resp["usage"]["output_tokens"], 5);
+    }
+
     // ── Model mapping ───────────────────────────────────────────────────
 
     #[test]
@@ -612,8 +648,8 @@ mod tests {
         );
 
         // When inactive, should pass through unchanged — verify via direct poll
-        let waker = std::task::Waker::from(std::sync::Arc::new(NoopWaker));
-        let mut cx = Context::from_waker(&waker);
+        let waker = std::task::Waker::noop();
+        let mut cx = Context::from_waker(waker);
         let mut stream = stream;
         match Pin::new(&mut stream).poll_next(&mut cx) {
             Poll::Ready(Some(Ok(chunk))) => {
@@ -621,11 +657,6 @@ mod tests {
             }
             other => panic!("expected Ready(Some(Ok)), got {other:?}"),
         }
-    }
-
-    struct NoopWaker;
-    impl std::task::Wake for NoopWaker {
-        fn wake(self: std::sync::Arc<Self>) {}
     }
 
     // ── Cache token preservation ────────────────────────────────────────
@@ -734,5 +765,57 @@ mod tests {
         assert_eq!(usage.metrics.cache_creation_5m_input_tokens, Some(20));
         assert_eq!(usage.metrics.cache_creation_1h_input_tokens, Some(5));
         assert_eq!(usage.metrics.cache_creation_input_tokens, Some(25));
+    }
+
+    #[test]
+    fn e2e_response_preserves_openai_cache_write_alias_for_json_and_streaming_sse() {
+        let bridge = get_bridge("cx2cc").unwrap();
+        let ctx = cx2cc_ctx();
+
+        for expected in [200, 0] {
+            let openai_resp = json!({
+                "id": format!("resp_cache_write_{expected}"),
+                "model": "gpt-5.6-sol",
+                "status": "completed",
+                "output": [{
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "cached response"}]
+                }],
+                "usage": {
+                    "input_tokens": 1000,
+                    "output_tokens": 50,
+                    "input_tokens_details": {
+                        "cached_tokens": 100,
+                        "cache_write_tokens": expected
+                    }
+                }
+            });
+
+            let anthropic = bridge
+                .translate_response(openai_resp.clone(), &ctx)
+                .expect("translate JSON response");
+            assert_eq!(anthropic["usage"]["input_tokens"], 1000);
+            assert_eq!(anthropic["usage"]["cache_read_input_tokens"], 100);
+            assert_eq!(anthropic["usage"]["cache_creation_input_tokens"], expected);
+
+            let mut translator = bridge.create_stream_translator();
+            let frames = translator
+                .translate_event(
+                    "response.completed",
+                    &json!({ "response": openai_resp }),
+                    &ctx,
+                )
+                .expect("translate response.completed SSE event");
+            let sse_bytes: Vec<u8> = frames
+                .iter()
+                .flat_map(|frame| frame.iter().copied())
+                .collect();
+            let usage = crate::usage::parse_usage_from_json_or_sse_bytes("claude", &sse_bytes)
+                .expect("usage should survive CX2CC SSE round trip");
+            assert_eq!(usage.metrics.input_tokens, Some(1000));
+            assert_eq!(usage.metrics.cache_read_input_tokens, Some(100));
+            assert_eq!(usage.metrics.cache_creation_input_tokens, Some(expected));
+        }
     }
 }

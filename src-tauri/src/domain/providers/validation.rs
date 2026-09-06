@@ -32,6 +32,29 @@ pub(super) fn normalize_note(value: Option<&str>) -> crate::shared::error::AppRe
     Ok(note)
 }
 
+/// Write-path validation: rejects over-length model names, matching the frontend
+/// editor limit. The read path (`normalize_model_slot`) keeps truncating so
+/// legacy/hand-edited rows still load.
+pub(super) fn validate_claude_models(
+    models: &super::types::ClaudeModels,
+) -> crate::shared::error::AppResult<()> {
+    let fields = [
+        ("main_model", models.main_model.as_deref()),
+        ("reasoning_model", models.reasoning_model.as_deref()),
+        ("haiku_model", models.haiku_model.as_deref()),
+        ("sonnet_model", models.sonnet_model.as_deref()),
+        ("opus_model", models.opus_model.as_deref()),
+    ];
+    for (field, value) in fields {
+        let trimmed = value.unwrap_or("").trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        validate_max_chars(field, trimmed, super::types::MAX_MODEL_NAME_LEN)?;
+    }
+    Ok(())
+}
+
 pub(super) fn parse_reset_time_hms(input: &str) -> Option<(u8, u8, u8)> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -134,7 +157,7 @@ pub(super) fn validate_cli_key(cli_key: &str) -> crate::shared::error::AppResult
     crate::shared::cli_key::validate_cli_key(cli_key)
 }
 
-pub(super) fn normalize_base_urls(
+pub(crate) fn normalize_base_urls(
     base_urls: Vec<String>,
 ) -> crate::shared::error::AppResult<Vec<String>> {
     let initial_capacity = base_urls.len().clamp(1, MAX_PROVIDER_BASE_URLS);

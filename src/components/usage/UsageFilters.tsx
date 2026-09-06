@@ -1,7 +1,7 @@
 // Usage: 用量页面筛选器组件 — CLI + 时间窗 + 自定义日期。
 
 import { Button } from "../../ui/Button";
-import { CLI_FILTER_ITEMS, type CliFilterKey } from "../../constants/clis";
+import { cliFilterItemsWith, type CliFilterKey } from "../../constants/clis";
 import { PERIOD_ITEMS } from "../../constants/periods";
 import type { UsagePeriod } from "../../services/usage/usage";
 import type { CustomDateRangeApplied } from "../../hooks/useCustomDateRange";
@@ -23,6 +23,7 @@ type UsageFiltersProps = {
 };
 
 type ButtonGroupItem<T extends string> = { key: T; label: string };
+const USAGE_CLI_FILTER_ITEMS = cliFilterItemsWith("usage");
 
 function FilterButtonGroup<T extends string>({
   ariaLabel,
@@ -38,7 +39,8 @@ function FilterButtonGroup<T extends string>({
   loading: boolean;
 }) {
   return (
-    <div className="flex items-center gap-1.5" role="group" aria-label={ariaLabel}>
+    <fieldset className="flex items-center gap-1.5 border-0 p-0">
+      <legend className="sr-only">{ariaLabel}</legend>
       {items.map((item) => (
         <Button
           key={item.key}
@@ -52,7 +54,7 @@ function FilterButtonGroup<T extends string>({
           {item.label}
         </Button>
       ))}
-    </div>
+    </fieldset>
   );
 }
 
@@ -83,15 +85,15 @@ function CustomDateRangeForm({
         value={customStartDate}
         onChange={(e) => onCustomStartDateChange(e.currentTarget.value)}
         aria-label="开始日期"
-        className="h-8 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 text-xs text-slate-900 dark:text-slate-100 outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+        className="h-8 rounded-md border border-border bg-white dark:bg-secondary px-2 text-xs text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
       />
-      <span className="text-xs text-slate-400">→</span>
+      <span className="text-xs text-muted-foreground">→</span>
       <input
         type="date"
         value={customEndDate}
         onChange={(e) => onCustomEndDateChange(e.currentTarget.value)}
         aria-label="结束日期"
-        className="h-8 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 text-xs text-slate-900 dark:text-slate-100 outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
+        className="h-8 rounded-md border border-border bg-white dark:bg-secondary px-2 text-xs text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20"
       />
       <Button size="sm" variant="primary" onClick={onApplyCustomRange} disabled={loading}>
         应用
@@ -100,7 +102,7 @@ function CustomDateRangeForm({
         清空
       </Button>
       {customApplied ? (
-        <span className="text-xs font-medium text-slate-600 dark:text-slate-400">
+        <span className="text-xs font-medium text-muted-foreground">
           {customApplied.startDate} → {customApplied.endDate}
         </span>
       ) : null}
@@ -129,14 +131,14 @@ export function UsageFilters({
       {/* CLI 筛选 */}
       <FilterButtonGroup
         ariaLabel="CLI 筛选"
-        items={CLI_FILTER_ITEMS}
+        items={USAGE_CLI_FILTER_ITEMS}
         value={cliKey}
         onChange={onCliKeyChange}
         loading={loading}
       />
 
       {/* 分隔 */}
-      <div className="hidden h-5 w-px bg-slate-200 dark:bg-slate-700 sm:block" />
+      <div className="hidden h-5 w-px bg-muted dark:bg-secondary sm:block" />
 
       {/* 时间窗筛选 */}
       <FilterButtonGroup

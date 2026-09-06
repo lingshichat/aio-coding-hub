@@ -3,6 +3,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 
+use super::model_policy::{ProviderModelPolicyStatus, ProviderModelPolicyV1};
+
 pub(super) const DEFAULT_PRIORITY: i64 = 100;
 pub(super) const MAX_MODEL_NAME_LEN: usize = 200;
 pub(crate) const CX2CC_BRIDGE_TYPE: &str = "cx2cc";
@@ -71,6 +73,7 @@ pub struct ProviderUpsertParams {
     pub cost_multiplier: f64,
     pub priority: Option<i64>,
     pub claude_models: Option<ClaudeModels>,
+    pub model_policy: Option<ProviderModelPolicyV1>,
     pub limit_5h_usd: Option<f64>,
     pub limit_daily_usd: Option<f64>,
     pub daily_reset_mode: Option<DailyResetMode>,
@@ -83,6 +86,7 @@ pub struct ProviderUpsertParams {
     pub source_provider_id: Option<i64>,
     pub bridge_type: Option<String>,
     pub stream_idle_timeout_seconds: Option<u32>,
+    pub extension_values: Option<Vec<ProviderExtensionValuesInput>>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, specta::Type)]
@@ -138,14 +142,7 @@ impl ClaudeModels {
     pub(crate) fn map_model(&self, original_model: &str, has_thinking: bool) -> String {
         let model_lower = original_model.to_ascii_lowercase();
 
-        // 1) thinking 模式优先使用推理模型
-        if has_thinking {
-            if let Some(model) = self.reasoning_model.as_deref() {
-                return model.to_string();
-            }
-        }
-
-        // 2) 按模型类型匹配（子串）
+        // 1) 按模型类型匹配（子串）
         if model_lower.contains("haiku") {
             if let Some(model) = self.haiku_model.as_deref() {
                 return model.to_string();
@@ -158,6 +155,13 @@ impl ClaudeModels {
         }
         if model_lower.contains("sonnet") {
             if let Some(model) = self.sonnet_model.as_deref() {
+                return model.to_string();
+            }
+        }
+
+        // 2) thinking 模式在未命中具体模型槽位时使用推理模型
+        if has_thinking {
+            if let Some(model) = self.reasoning_model.as_deref() {
                 return model.to_string();
             }
         }
@@ -196,6 +200,23 @@ impl ProviderBaseUrlMode {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderExtensionValues {
+    pub plugin_id: String,
+    pub namespace: String,
+    pub values: serde_json::Value,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, specta::Type, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderExtensionValuesInput {
+    pub plugin_id: String,
+    pub namespace: String,
+    pub values: serde_json::Value,
+}
+
 #[derive(Debug, Clone, Serialize, specta::Type)]
 pub struct ProviderSummary {
     pub id: i64,
@@ -204,6 +225,8 @@ pub struct ProviderSummary {
     pub base_urls: Vec<String>,
     pub base_url_mode: ProviderBaseUrlMode,
     pub claude_models: ClaudeModels,
+    pub model_policy: Option<ProviderModelPolicyV1>,
+    pub model_policy_status: ProviderModelPolicyStatus,
     pub enabled: bool,
     pub priority: i64,
     pub cost_multiplier: f64,
@@ -226,7 +249,13 @@ pub struct ProviderSummary {
     pub source_provider_id: Option<i64>,
     pub bridge_type: Option<String>,
     pub stream_idle_timeout_seconds: Option<u32>,
+    pub extension_values: Vec<ProviderExtensionValues>,
     pub api_key_configured: bool,
+}
+
+#[derive(Debug, Clone, Serialize, specta::Type)]
+pub struct ProviderRouteRow {
+    pub provider_id: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -237,6 +266,8 @@ pub(crate) struct ProviderForGateway {
     pub base_url_mode: ProviderBaseUrlMode,
     pub api_key_plaintext: String,
     pub claude_models: ClaudeModels,
+    pub model_policy: Option<ProviderModelPolicyV1>,
+    pub model_policy_status: ProviderModelPolicyStatus,
     pub limit_5h_usd: Option<f64>,
     pub limit_daily_usd: Option<f64>,
     pub daily_reset_mode: DailyResetMode,
@@ -250,6 +281,7 @@ pub(crate) struct ProviderForGateway {
     #[allow(dead_code)] // Will be read when failover_loop uses bridge_type for dispatch.
     pub bridge_type: Option<String>,
     pub stream_idle_timeout_seconds: Option<u32>,
+    pub extension_values: Vec<ProviderExtensionValues>,
 }
 
 #[derive(Debug, Clone)]
@@ -286,6 +318,8 @@ pub(super) struct DecodedProviderRow {
     pub base_urls: Vec<String>,
     pub base_url_mode: ProviderBaseUrlMode,
     pub claude_models: ClaudeModels,
+    pub model_policy: Option<ProviderModelPolicyV1>,
+    pub model_policy_status: ProviderModelPolicyStatus,
     pub limit_5h_usd: Option<f64>,
     pub limit_daily_usd: Option<f64>,
     pub daily_reset_mode: DailyResetMode,

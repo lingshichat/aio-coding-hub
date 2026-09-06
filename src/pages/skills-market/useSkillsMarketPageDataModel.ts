@@ -1,16 +1,17 @@
 // Usage: Data-model hook for the skills market page.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { CLIS, cliFromKeyOrDefault, isCliKey } from "../../constants/clis";
+import { cliFromKeyOrDefault, cliKeysWith, isCliKey } from "../../constants/clis";
+import { SKILLS_ACTIVE_CLI_STORAGE_KEY } from "../../constants/skills";
 import { useSettingsQuery } from "../../query/settings";
 import {
   useSkillInstallToLocalMutation,
+  useSkillRepoDiscoverAvailableMutation,
   useSkillRepoDeleteMutation,
   useSkillRepoUpsertMutation,
   useSkillReposListQuery,
-  useSkillsDiscoverAvailableMutation,
   useSkillsDiscoverAvailableQuery,
   useSkillsInstalledListQuery,
   useSkillsLocalListQuery,
@@ -34,6 +35,8 @@ import {
   sourceKey,
 } from "../../utils/skillSources";
 
+const SKILLS_CLI_KEYS = cliKeysWith("skills");
+
 type MarketStatus = "not_installed" | "local_installed" | "needs_enable" | "enabled";
 
 type RepoGroup = {
@@ -49,21 +52,50 @@ type RepoGroup = {
   enabledCount: number;
 };
 
+type ExpandedReposState = {
+  resetKey: string;
+  values: Set<string>;
+};
+
 function readCliFromStorage(): CliKey | null {
   try {
-    const raw = localStorage.getItem("skills.activeCli");
-    if (isCliKey(raw)) return raw;
+    const raw = localStorage.getItem(SKILLS_ACTIVE_CLI_STORAGE_KEY);
+    if (isCliKey(raw) && SKILLS_CLI_KEYS.includes(raw)) return raw;
   } catch {}
   return null;
 }
 
 function writeCliToStorage(cli: CliKey) {
   try {
-    localStorage.setItem("skills.activeCli", cli);
+    localStorage.setItem(SKILLS_ACTIVE_CLI_STORAGE_KEY, cli);
   } catch {}
 }
 
-export function formatUnixSeconds(ts: number) {
+function expandedReposResetKey(groupedAvailable: RepoGroup[], repoFilter: string) {
+  return `${repoFilter}:${groupedAvailable.map((group) => group.key).join(",")}`;
+}
+
+function nextExpandedReposState(
+  current: ExpandedReposState,
+  groupedAvailable: RepoGroup[],
+  repoFilter: string
+): ExpandedReposState {
+  const allowed = new Set(groupedAvailable.map((group) => group.key));
+  const values = new Set(Array.from(current.values).filter((key) => allowed.has(key)));
+
+  if (repoFilter !== "all" && allowed.has(repoFilter)) {
+    values.add(repoFilter);
+  } else if (values.size === 0 && groupedAvailable[0]) {
+    values.add(groupedAvailable[0].key);
+  }
+
+  return {
+    resetKey: expandedReposResetKey(groupedAvailable, repoFilter),
+    values,
+  };
+}
+
+function formatUnixSeconds(ts: number) {
   try {
     return new Date(ts * 1000).toLocaleString();
   } catch {
@@ -71,14 +103,14 @@ export function formatUnixSeconds(ts: number) {
   }
 }
 
-export function statusLabel(status: MarketStatus) {
+function statusLabel(status: MarketStatus) {
   if (status === "local_installed") return "已装到当前 CLI";
   if (status === "enabled") return "已在通用技能";
   if (status === "needs_enable") return "通用技能未启用";
   return "未安装";
 }
 
-export function statusTone(status: MarketStatus) {
+function statusTone(status: MarketStatus) {
   if (status === "local_installed") {
     return "bg-sky-50 text-sky-700 dark:bg-sky-900/30 dark:text-sky-300";
   }
@@ -101,16 +133,20 @@ function statusRank(status: MarketStatus) {
 export function useSkillsMarketPageDataModel() {
   const navigate = useNavigate();
   const settingsQuery = useSettingsQuery();
-  const orderedCliTabs = getOrderedClis(settingsQuery.data?.cli_priority_order);
+  const orderedCliTabs = getOrderedClis(settingsQuery.data?.cli_priority_order, SKILLS_CLI_KEYS);
   const orderedCliKeys = orderedCliTabs.map((cli) => cli.key);
   const defaultCli =
-    pickDefaultCliByPriority(settingsQuery.data?.cli_priority_order, orderedCliKeys) ?? CLIS[0].key;
+    pickDefaultCliByPriority(settingsQuery.data?.cli_priority_order, orderedCliKeys) ??
+    SKILLS_CLI_KEYS[0];
 
   const [activeCli, setActiveCli] = useState<CliKey | null>(() => readCliFromStorage());
   const [query, setQuery] = useState("");
   const [repoFilter, setRepoFilter] = useState<string>("all");
   const [onlyActionable, setOnlyActionable] = useState(true);
-  const [expandedRepos, setExpandedRepos] = useState<Set<string>>(new Set());
+  const [expandedReposState, setExpandedReposState] = useState<ExpandedReposState>(() => ({
+    resetKey: "",
+    values: new Set(),
+  }));
   const [installingRepoKey, setInstallingRepoKey] = useState<string | null>(null);
   const [installingSources, setInstallingSources] = useState<Set<string>>(new Set());
   const [repoDialogOpen, setRepoDialogOpen] = useState(false);
@@ -126,7 +162,8 @@ export function useSkillsMarketPageDataModel() {
 
   const reposQuery = useSkillReposListQuery();
   const repos = useMemo(() => reposQuery.data ?? [], [reposQuery.data]);
-  const enabledRepoCount = useMemo(() => repos.filter((repo) => repo.enabled).length, [repos]);
+  const enabledRepos = useMemo(() => repos.filter((repo) => repo.enabled), [repos]);
+  const enabledRepoCount = enabledRepos.length;
 
   const workspacesQuery = useWorkspacesListQuery(effectiveCli);
   const activeWorkspaceId = workspacesQuery.data?.active_id ?? null;
@@ -149,7 +186,7 @@ export function useSkillsMarketPageDataModel() {
   );
   const available = useMemo(() => availableQuery.data ?? [], [availableQuery.data]);
 
-  const discoverMutation = useSkillsDiscoverAvailableMutation();
+  const discoverRepoMutation = useSkillRepoDiscoverAvailableMutation();
   const repoUpsertMutation = useSkillRepoUpsertMutation();
   const repoDeleteMutation = useSkillRepoDeleteMutation();
   const installToLocalMutation = useSkillInstallToLocalMutation(activeWorkspaceId);
@@ -159,12 +196,13 @@ export function useSkillsMarketPageDataModel() {
     workspacesQuery.isLoading ||
     installedQuery.isLoading ||
     (Boolean(activeWorkspaceId) && localQuery.isLoading);
-  const discovering = discoverMutation.isPending || availableQuery.isFetching;
+  const discovering = discoverRepoMutation.isPending || availableQuery.isFetching;
   const installBusy = installingRepoKey != null || installingSources.size > 0;
 
-  useEffect(() => {
-    writeCliToStorage(effectiveCli);
-  }, [effectiveCli]);
+  const setStoredActiveCli = useCallback((cli: CliKey) => {
+    setActiveCli(cli);
+    writeCliToStorage(cli);
+  }, []);
 
   const installedBySource = useMemo(() => {
     const map = new Map<string, InstalledSkillSummary>();
@@ -292,39 +330,64 @@ export function useSkillsMarketPageDataModel() {
       });
   }, [filteredAvailable, getStatus]);
 
-  useEffect(() => {
-    setExpandedRepos((previous) => {
-      const allowed = new Set(groupedAvailable.map((group) => group.key));
-      const next = new Set(Array.from(previous).filter((key) => allowed.has(key)));
-
-      if (repoFilter !== "all" && allowed.has(repoFilter)) {
-        next.add(repoFilter);
-      } else if (next.size === 0 && groupedAvailable[0]) {
-        next.add(groupedAvailable[0].key);
-      }
-
-      return next;
-    });
-  }, [groupedAvailable, repoFilter]);
+  const nextExpandedRepos = nextExpandedReposState(
+    expandedReposState,
+    groupedAvailable,
+    repoFilter
+  );
+  let expandedRepos = expandedReposState.values;
+  if (expandedReposState.resetKey !== nextExpandedRepos.resetKey) {
+    expandedRepos = nextExpandedRepos.values;
+    setExpandedReposState(nextExpandedRepos);
+  }
 
   async function refreshAvailable(refresh: boolean, toastOnSuccess = true) {
-    try {
-      const rows = await discoverMutation.mutateAsync(refresh);
-      if (!rows) return;
+    if (enabledRepos.length === 0) {
+      toast("没有启用的 Skill 仓库");
+      return;
+    }
 
-      logToConsole("info", refresh ? "刷新 Skill 发现（下载更新）" : "扫描 Skill（缓存）", {
-        refresh,
-        count: rows.length,
-      });
-      if (toastOnSuccess) toast(`已发现 ${rows.length} 个 Skill`);
-    } catch (error) {
-      const formatted = formatActionFailureToast("刷新发现", error);
-      logToConsole("error", "刷新 Skill 发现失败", {
-        error: formatted.raw,
-        error_code: formatted.error_code ?? undefined,
-        refresh,
-      });
-      toast(formatted.toast);
+    const outcomes = await Promise.all(
+      enabledRepos.map(async (repo) => {
+        try {
+          const rows = await discoverRepoMutation.mutateAsync({ repo, refresh });
+          if (!rows) return { refreshed: false, failed: false, discovered: 0 };
+
+          logToConsole("info", refresh ? "刷新 Skill 仓库发现" : "扫描 Skill 仓库缓存", {
+            refresh,
+            repo_id: repo.id,
+            git_url: repo.git_url,
+            branch: repo.branch,
+            count: rows.length,
+          });
+          return { refreshed: true, failed: false, discovered: rows.length };
+        } catch (error) {
+          const formatted = formatActionFailureToast("刷新发现", error);
+          logToConsole("error", "刷新 Skill 仓库发现失败", {
+            error: formatted.raw,
+            error_code: formatted.error_code ?? undefined,
+            refresh,
+            repo_id: repo.id,
+            git_url: repo.git_url,
+            branch: repo.branch,
+          });
+          return { refreshed: false, failed: true, discovered: 0 };
+        }
+      })
+    );
+
+    const refreshedCount = outcomes.filter((outcome) => outcome.refreshed).length;
+    const failedCount = outcomes.filter((outcome) => outcome.failed).length;
+    const discoveredCount = outcomes.reduce((sum, outcome) => sum + outcome.discovered, 0);
+
+    if (toastOnSuccess) {
+      if (failedCount === 0) {
+        toast(`已刷新 ${refreshedCount} 个仓库，发现 ${discoveredCount} 个 Skill`);
+      } else if (refreshedCount > 0) {
+        toast(`已刷新 ${refreshedCount} 个仓库，${failedCount} 个失败`);
+      } else {
+        toast("刷新发现失败");
+      }
     }
   }
 
@@ -477,22 +540,26 @@ export function useSkillsMarketPageDataModel() {
     let failedCount = 0;
 
     try {
-      for (const skill of targets) {
-        try {
-          const next = await installSkillToCurrentCli(skill, true);
-          if (next) successCount += 1;
-        } catch (error) {
-          failedCount += 1;
-          const formatted = formatActionFailureToast("安装到当前 CLI", error);
-          logToConsole("error", "批量安装 Skill 到当前 CLI 失败", {
-            error: formatted.raw,
-            error_code: formatted.error_code ?? undefined,
-            cli: effectiveCli,
-            repo: group.repoPath,
-            skill,
-          });
-        }
-      }
+      const outcomes = await Promise.all(
+        targets.map(async (skill) => {
+          try {
+            const next = await installSkillToCurrentCli(skill, true);
+            return { success: Boolean(next), failed: false };
+          } catch (error) {
+            const formatted = formatActionFailureToast("安装到当前 CLI", error);
+            logToConsole("error", "批量安装 Skill 到当前 CLI 失败", {
+              error: formatted.raw,
+              error_code: formatted.error_code ?? undefined,
+              cli: effectiveCli,
+              repo: group.repoPath,
+              skill,
+            });
+            return { success: false, failed: true };
+          }
+        })
+      );
+      successCount = outcomes.filter((outcome) => outcome.success).length;
+      failedCount = outcomes.filter((outcome) => outcome.failed).length;
     } finally {
       setInstallingRepoKey(null);
       setInstallingSources(new Set());
@@ -511,14 +578,17 @@ export function useSkillsMarketPageDataModel() {
   }
 
   function toggleRepoExpanded(groupKey: string) {
-    setExpandedRepos((previous) => {
-      const next = new Set(previous);
+    setExpandedReposState((previous) => {
+      const next = new Set(previous.values);
       if (next.has(groupKey)) {
         next.delete(groupKey);
       } else {
         next.add(groupKey);
       }
-      return next;
+      return {
+        ...previous,
+        values: next,
+      };
     });
   }
 
@@ -526,7 +596,7 @@ export function useSkillsMarketPageDataModel() {
     navigate,
     orderedCliTabs,
     effectiveCli,
-    setActiveCli,
+    setActiveCli: setStoredActiveCli,
     currentCli,
     repos,
     enabledRepoCount,

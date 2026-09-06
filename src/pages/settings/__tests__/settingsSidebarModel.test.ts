@@ -17,9 +17,8 @@ describe("pages/settings/settingsSidebarModel", () => {
     expect(
       buildRequestLogsClearedMessage({
         request_logs_deleted: 3,
-        request_attempt_logs_deleted: 4,
       })
-    ).toBe("已清理请求日志：request_logs 3 条；legacy request_attempt_logs 4 条");
+    ).toBe("已清理请求日志：request_logs 3 条");
   });
 
   it("builds config import success message", () => {
@@ -45,19 +44,32 @@ describe("pages/settings/settingsSidebarModel", () => {
         status: "not_modified",
         inserted: 0,
         updated: 0,
-        skipped: 0,
+        unchanged: 0,
         total: 0,
+        error: null,
       })
-    ).toBe("模型定价已是最新（无变更）");
+    ).toBe("定价已是最新，无变更");
 
     expect(
       buildModelPricesSyncMessage({
         status: "updated",
         inserted: 1,
         updated: 2,
-        skipped: 3,
+        unchanged: 3,
         total: 6,
+        error: null,
       })
-    ).toBe("同步完成：新增 1，更新 2，跳过 3");
+    ).toBe("定价同步完成：新增 1 · 更新 2 · 共 6 条");
+
+    expect(
+      buildModelPricesSyncMessage({
+        status: "failed",
+        inserted: 0,
+        updated: 0,
+        unchanged: 0,
+        total: 0,
+        error: "BaseLLM returned HTTP 500",
+      })
+    ).toBe("定价同步失败：BaseLLM returned HTTP 500");
   });
 });

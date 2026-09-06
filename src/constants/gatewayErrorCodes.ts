@@ -6,6 +6,9 @@ export const GatewayErrorCodes = {
   ALL_PROVIDERS_UNAVAILABLE: "GW_ALL_PROVIDERS_UNAVAILABLE",
   UPSTREAM_ALL_FAILED: "GW_UPSTREAM_ALL_FAILED",
   NO_ENABLED_PROVIDER: "GW_NO_ENABLED_PROVIDER",
+  FORCED_PROVIDER_NOT_ELIGIBLE_FOR_MODEL: "GW_FORCED_PROVIDER_NOT_ELIGIBLE_FOR_MODEL",
+  NO_ELIGIBLE_PROVIDER_FOR_MODEL: "GW_NO_ELIGIBLE_PROVIDER_FOR_MODEL",
+  MODEL_POLICY_INVALID: "GW_MODEL_POLICY_INVALID",
   UPSTREAM_TIMEOUT: "GW_UPSTREAM_TIMEOUT",
   UPSTREAM_CONNECT_FAILED: "GW_UPSTREAM_CONNECT_FAILED",
   UPSTREAM_5XX: "GW_UPSTREAM_5XX",
@@ -16,6 +19,8 @@ export const GatewayErrorCodes = {
   STREAM_ABORTED: "GW_STREAM_ABORTED",
   STREAM_IDLE_TIMEOUT: "GW_STREAM_IDLE_TIMEOUT",
   REQUEST_ABORTED: "GW_REQUEST_ABORTED",
+  REQUEST_INTERRUPTED_BY_RESTART: "GW_REQUEST_INTERRUPTED_BY_RESTART",
+  REQUEST_INTERRUPTED_BY_GATEWAY_STOP: "GW_REQUEST_INTERRUPTED_BY_GATEWAY_STOP",
   INTERNAL_ERROR: "GW_INTERNAL_ERROR",
   BODY_TOO_LARGE: "GW_BODY_TOO_LARGE",
   LARGE_BODY_MISSING_MODEL: "GW_LARGE_BODY_MISSING_MODEL",
@@ -43,10 +48,13 @@ export type GatewayErrorCode = (typeof GatewayErrorCodes)[keyof typeof GatewayEr
 
 export type GatewayErrorDescription = { desc: string; suggestion: string };
 
-export const GatewayErrorShortLabels = {
+const GatewayErrorShortLabels = {
   [GatewayErrorCodes.ALL_PROVIDERS_UNAVAILABLE]: "全部不可用",
   [GatewayErrorCodes.UPSTREAM_ALL_FAILED]: "全部失败",
   [GatewayErrorCodes.NO_ENABLED_PROVIDER]: "无供应商",
+  [GatewayErrorCodes.FORCED_PROVIDER_NOT_ELIGIBLE_FOR_MODEL]: "强制供应商不支持模型",
+  [GatewayErrorCodes.NO_ELIGIBLE_PROVIDER_FOR_MODEL]: "无匹配供应商",
+  [GatewayErrorCodes.MODEL_POLICY_INVALID]: "模型策略无效",
   [GatewayErrorCodes.UPSTREAM_TIMEOUT]: "上游超时",
   [GatewayErrorCodes.UPSTREAM_CONNECT_FAILED]: "连接失败",
   [GatewayErrorCodes.UPSTREAM_5XX]: "上游5XX",
@@ -57,6 +65,8 @@ export const GatewayErrorShortLabels = {
   [GatewayErrorCodes.STREAM_ABORTED]: "流中断",
   [GatewayErrorCodes.STREAM_IDLE_TIMEOUT]: "流空闲超时",
   [GatewayErrorCodes.REQUEST_ABORTED]: "请求中断",
+  [GatewayErrorCodes.REQUEST_INTERRUPTED_BY_RESTART]: "重启中断",
+  [GatewayErrorCodes.REQUEST_INTERRUPTED_BY_GATEWAY_STOP]: "网关停止",
   [GatewayErrorCodes.INTERNAL_ERROR]: "内部错误",
   [GatewayErrorCodes.BODY_TOO_LARGE]: "请求过大",
   [GatewayErrorCodes.LARGE_BODY_MISSING_MODEL]: "缺少 model",
@@ -98,9 +108,22 @@ export const GatewayErrorDescriptions = {
     desc: "没有已启用的 Provider",
     suggestion: "当前 CLI 没有启用任何 Provider。请前往 Provider 管理页面启用至少一个 Provider。",
   },
+  GW_FORCED_PROVIDER_NOT_ELIGIBLE_FOR_MODEL: {
+    desc: "强制指定的 Provider 不支持请求模型",
+    suggestion: "请清除强制 Provider，或为该 Provider 添加匹配的模型规则。",
+  },
+  GW_NO_ELIGIBLE_PROVIDER_FOR_MODEL: {
+    desc: "没有符合模型策略的 Provider",
+    suggestion: "请为至少一个已启用 Provider 添加该模型规则，或使用“全部模型”模式。",
+  },
+  GW_MODEL_POLICY_INVALID: {
+    desc: "Provider 的模型策略无效",
+    suggestion: "请在 Provider 编辑器中重置模型策略并保存后重试。",
+  },
   GW_UPSTREAM_TIMEOUT: {
     desc: "上游服务响应超时",
-    suggestion: "Provider 响应时间过长。请检查 Provider 服务状态，或考虑在设置中增加超时时间。",
+    suggestion:
+      "Provider 在配置的首字节超时内未返回响应。若上游响应普遍偏慢（大上下文、冷缓存），请调大：设置 → 通用 → 首字节超时（0=禁用）；若上游为自建网关，请检查其反代是否缓冲了流式响应。",
   },
   GW_UPSTREAM_CONNECT_FAILED: {
     desc: "无法连接到上游服务",
@@ -138,6 +161,14 @@ export const GatewayErrorDescriptions = {
     desc: "请求被中断",
     suggestion: "客户端（CLI 工具）主动取消了请求，或因总超时被网关主动终止。",
   },
+  GW_REQUEST_INTERRUPTED_BY_RESTART: {
+    desc: "请求因应用重启被中断",
+    suggestion: "AIO 重启或异常退出时该请求尚未写入终态，已在启动恢复时标记为中断。",
+  },
+  GW_REQUEST_INTERRUPTED_BY_GATEWAY_STOP: {
+    desc: "请求因网关停止被中断",
+    suggestion: "网关停止、应用关闭或设置触发重启时该请求尚未写入终态，已标记为中断。",
+  },
   GW_INTERNAL_ERROR: {
     desc: "网关内部错误",
     suggestion: "网关自身发生了意外错误。请查看日志文件获取更多信息。",
@@ -153,7 +184,7 @@ export const GatewayErrorDescriptions = {
   },
   GW_INVALID_CLI_KEY: {
     desc: "无效的 CLI Key",
-    suggestion: "请求中的 CLI Key 无法识别。支持的 CLI Key 包括 claude、codex、gemini。",
+    suggestion: "请求中的 CLI Key 无法识别。支持的 CLI Key 包括 claude、codex、gemini、grok。",
   },
   GW_INVALID_BASE_URL: {
     desc: "无效的 Base URL",

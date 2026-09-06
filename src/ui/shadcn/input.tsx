@@ -1,26 +1,22 @@
-import { forwardRef } from "react";
 import { cn } from "@/ui/shadcn/utils";
 
-export type InputProps = React.InputHTMLAttributes<HTMLInputElement> & {
+export type InputProps = React.ComponentPropsWithRef<"input"> & {
   mono?: boolean;
 };
 
-export const Input = forwardRef<HTMLInputElement, InputProps>(function Input(
-  { className, mono, ...props },
-  ref
-) {
+export function Input({ className, mono, ref, ...props }: InputProps) {
   return (
     <input
       ref={ref}
       className={cn(
-        "h-10 w-full rounded-lg border border-input bg-card px-3 text-sm text-foreground shadow-sm outline-none transition",
+        "h-10 w-full rounded-lg border border-line bg-surface-inset px-3 text-sm text-foreground outline-none transition-colors",
         "placeholder:text-muted-foreground",
-        "focus:border-ring focus:ring-2 focus:ring-ring/20",
-        "disabled:cursor-not-allowed disabled:opacity-50",
+        "focus:border-ring focus:bg-surface-panel focus:ring-2 focus:ring-ring/30 focus:ring-offset-2 focus:ring-offset-background",
+        "disabled:cursor-not-allowed disabled:bg-surface-muted disabled:opacity-60",
         mono ? "font-mono" : null,
         className
       )}
       {...props}
     />
   );
-});
+}

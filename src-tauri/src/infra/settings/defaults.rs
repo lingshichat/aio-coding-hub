@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-pub const SCHEMA_VERSION: u32 = 32;
+pub const SCHEMA_VERSION: u32 = 37;
 pub const DEFAULT_GATEWAY_PORT: u16 = 37123;
 pub const MAX_GATEWAY_PORT: u16 = 37199;
 pub const DEFAULT_PROVIDER_COOLDOWN_SECONDS: u32 = 30;
@@ -39,19 +39,32 @@ pub(super) const SCHEMA_VERSION_ADD_CLI_PRIORITY_ORDER: u32 = 29;
 pub(super) const SCHEMA_VERSION_RAISE_STREAM_IDLE_TIMEOUT_DEFAULT: u32 = 30;
 pub(super) const SCHEMA_VERSION_ADD_UPSTREAM_PROXY: u32 = 31;
 pub(super) const SCHEMA_VERSION_ADD_UPSTREAM_PROXY_CREDENTIALS: u32 = 32;
+pub(super) const SCHEMA_VERSION_ADD_CODEX_OAUTH_COMPATIBLE_PROXY_MODE: u32 = 33;
+pub(super) const SCHEMA_VERSION_ADD_REQUEST_LOG_RETENTION: u32 = 34;
+pub(super) const SCHEMA_VERSION_ADD_GROK_PROXY_PREFERENCES: u32 = 35;
+pub(super) const SCHEMA_VERSION_ADD_IMAGE_GEN_STORAGE_DIR: u32 = 36;
+pub(super) const SCHEMA_VERSION_ALIGN_CCH_GATEWAY_RECTIFIERS: u32 = 37;
 
 pub(super) const DEFAULT_LOG_RETENTION_DAYS: u32 = 7;
 pub(super) const MAX_LOG_RETENTION_DAYS: u32 = 3650;
+// Request-log DB retention: 0 = keep forever. Deliberately NOT sharing
+// log_retention_days — request_logs feed long-horizon usage/cost stats and
+// must never be silently trimmed by the file-log default.
+pub(super) const DEFAULT_REQUEST_LOG_RETENTION_DAYS: u32 = 0;
+pub(super) const MAX_REQUEST_LOG_RETENTION_DAYS: u32 = 3650;
 pub(super) const DEFAULT_FAILOVER_MAX_ATTEMPTS_PER_PROVIDER: u32 = 5;
 pub(super) const DEFAULT_FAILOVER_MAX_PROVIDERS_TO_TRY: u32 = 5;
 pub(super) const DEFAULT_CIRCUIT_BREAKER_FAILURE_THRESHOLD: u32 = 5;
 pub(super) const DEFAULT_CIRCUIT_BREAKER_OPEN_DURATION_MINUTES: u32 = 30;
 pub(super) const DEFAULT_ENABLE_CIRCUIT_BREAKER_NOTICE: bool = false;
-pub(super) const DEFAULT_VERBOSE_PROVIDER_ERROR: bool = true;
-pub(super) const DEFAULT_INTERCEPT_ANTHROPIC_WARMUP_REQUESTS: bool = true;
+pub(super) const DEFAULT_VERBOSE_PROVIDER_ERROR: bool = false;
+pub(super) const DEFAULT_INTERCEPT_ANTHROPIC_WARMUP_REQUESTS: bool = false;
+pub(super) const DEFAULT_ENABLE_THINKING_EFFORT_CONFLICT_RECTIFIER: bool = true;
 pub(super) const DEFAULT_ENABLE_THINKING_SIGNATURE_RECTIFIER: bool = true;
 pub(super) const DEFAULT_ENABLE_THINKING_BUDGET_RECTIFIER: bool = true;
-pub(super) const DEFAULT_ENABLE_BILLING_HEADER_RECTIFIER: bool = false;
+pub(super) const DEFAULT_ENABLE_GEMINI_FUNCTION_ID_RECTIFIER: bool = true;
+pub(super) const DEFAULT_ENABLE_RESPONSE_INPUT_RECTIFIER: bool = true;
+pub(super) const DEFAULT_ENABLE_BILLING_HEADER_RECTIFIER: bool = true;
 pub(super) const DEFAULT_ENABLE_CODEX_SESSION_ID_COMPLETION: bool = true;
 pub(super) const DEFAULT_ENABLE_CLAUDE_METADATA_USER_ID_INJECTION: bool = true;
 pub(super) const DEFAULT_ENABLE_CACHE_ANOMALY_MONITOR: bool = false;
@@ -60,6 +73,7 @@ pub(super) const DEFAULT_ENABLE_TASK_COMPLETE_NOTIFY: bool = true;
 pub(super) const DEFAULT_ENABLE_NOTIFICATION_SOUND: bool = true;
 pub(super) const DEFAULT_ENABLE_RESPONSE_FIXER: bool = true;
 pub(super) const DEFAULT_ENABLE_CLI_PROXY_STARTUP_RECOVERY: bool = true;
+pub(super) const DEFAULT_CODEX_OAUTH_COMPATIBLE_PROXY_MODE: bool = false;
 pub(super) const DEFAULT_SHOW_HOME_HEATMAP: bool = true;
 pub(super) const DEFAULT_SHOW_HOME_USAGE: bool = true;
 pub(super) const DEFAULT_RESPONSE_FIXER_FIX_ENCODING: bool = true;

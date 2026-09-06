@@ -1,5 +1,4 @@
 import type { CliKey } from "../services/providers/providers";
-import type { CostPeriod } from "../services/usage/cost";
 import type { UsagePeriod, UsageRange, UsageScope } from "../services/usage/usage";
 import type { CliSessionsSource } from "../services/cli/cliSessions";
 
@@ -28,6 +27,7 @@ export const providersKeys = {
   all: providersAllKey,
   lists: () => [...providersAllKey, "list"] as const,
   list: (cliKey: CliKey) => [...providersAllKey, "list", cliKey] as const,
+  defaultRoute: (cliKey: CliKey) => [...providersAllKey, "defaultRoute", cliKey] as const,
   oauthStatus: (providerId: number | null) =>
     [...providersAllKey, "oauthStatus", providerId] as const,
 };
@@ -47,6 +47,7 @@ export const requestLogsKeys = {
   all: requestLogsAllKey,
   lists: () => [...requestLogsAllKey, "list"] as const,
   listAll: (limit: number | null) => [...requestLogsAllKey, "list", "all", limit] as const,
+  activeSnapshot: () => [...requestLogsAllKey, "activeSnapshot"] as const,
   detail: (logId: number | null) => [...requestLogsAllKey, "detail", logId] as const,
   attemptsByTrace: (traceId: string | null, limit: number | null) =>
     [...requestLogsAllKey, "attempts", traceId, limit] as const,
@@ -73,6 +74,9 @@ export const usageKeys = {
       cliKey: CliKey | null;
       providerId: number | null;
       folderKeys?: readonly string[] | null;
+      dayStartHour?: number | null;
+      fullIdleGapMinutes?: number | null;
+      sessionBreakGapMinutes?: number | null;
       excludeCx2CcGatewayBridge?: boolean | null;
     }
   ) =>
@@ -85,6 +89,9 @@ export const usageKeys = {
       input.cliKey,
       input.providerId,
       normalizeKeyParts(input.folderKeys ?? []),
+      input.dayStartHour ?? null,
+      input.fullIdleGapMinutes ?? null,
+      input.sessionBreakGapMinutes ?? null,
       input.excludeCx2CcGatewayBridge ?? null,
     ] as const,
   leaderboardV2: (
@@ -97,6 +104,9 @@ export const usageKeys = {
       providerId: number | null;
       limit: number | null;
       folderKeys?: readonly string[] | null;
+      dayStartHour?: number | null;
+      fullIdleGapMinutes?: number | null;
+      sessionBreakGapMinutes?: number | null;
       excludeCx2CcGatewayBridge?: boolean | null;
     }
   ) =>
@@ -111,27 +121,11 @@ export const usageKeys = {
       input.providerId,
       input.limit,
       normalizeKeyParts(input.folderKeys ?? []),
+      input.dayStartHour ?? null,
+      input.fullIdleGapMinutes ?? null,
+      input.sessionBreakGapMinutes ?? null,
       input.excludeCx2CcGatewayBridge ?? null,
     ] as const,
-  dayDetailV1: (input: {
-    day: string;
-    cliKey: CliKey | null;
-    providerId: number | null;
-    folderLimit: number | null;
-    folderKeys?: readonly string[] | null;
-    excludeCx2CcGatewayBridge?: boolean | null;
-  }) =>
-    [
-      ...usageAllKey,
-      "dayDetailV1",
-      input.day,
-      input.cliKey,
-      input.providerId,
-      input.folderLimit,
-      normalizeKeyParts(input.folderKeys ?? []),
-      input.excludeCx2CcGatewayBridge ?? null,
-    ] as const,
-  dayDetailV1Disabled: () => [...usageAllKey, "dayDetailV1", "disabled"] as const,
   folderOptionsV1: (
     period: UsagePeriod,
     input: {
@@ -139,6 +133,7 @@ export const usageKeys = {
       endTs: number | null;
       cliKey: CliKey | null;
       providerId: number | null;
+      dayStartHour?: number | null;
       excludeCx2CcGatewayBridge?: boolean | null;
     }
   ) =>
@@ -150,6 +145,7 @@ export const usageKeys = {
       input.endTs,
       input.cliKey,
       input.providerId,
+      input.dayStartHour ?? null,
       input.excludeCx2CcGatewayBridge ?? null,
     ] as const,
   providerCacheRateTrendV1: (
@@ -174,30 +170,27 @@ export const usageKeys = {
       input.limit,
       input.excludeCx2CcGatewayBridge ?? null,
     ] as const,
-};
-
-const costAllKey = ["cost"] as const;
-export const costKeys = {
-  all: costAllKey,
-  analyticsV1: (
-    period: CostPeriod,
+  providerMetricsTrendV1: (
+    period: UsagePeriod,
     input: {
       startTs: number | null;
       endTs: number | null;
       cliKey: CliKey | null;
       providerId: number | null;
-      model: string | null;
+      limit: number | null;
+      excludeCx2CcGatewayBridge?: boolean | null;
     }
   ) =>
     [
-      ...costAllKey,
-      "analyticsV1",
+      ...usageAllKey,
+      "providerMetricsTrendV1",
       period,
       input.startTs,
       input.endTs,
       input.cliKey,
       input.providerId,
-      input.model,
+      input.limit,
+      input.excludeCx2CcGatewayBridge ?? null,
     ] as const,
 };
 
@@ -234,6 +227,50 @@ export const skillsKeys = {
   paths: (cliKey: CliKey | null) => [...skillsAllKey, "paths", cliKey] as const,
 };
 
+const pluginsAllKey = ["plugins"] as const;
+export const pluginKeys = {
+  all: pluginsAllKey,
+  list: () => [...pluginsAllKey, "list"] as const,
+  detail: (pluginId: string | null) => [...pluginsAllKey, "detail", pluginId] as const,
+  installPreview: (filePath: string | null) =>
+    [...pluginsAllKey, "installPreview", filePath] as const,
+  updatePreview: (filePath: string | null) =>
+    [...pluginsAllKey, "updatePreview", filePath] as const,
+  auditLogs: (pluginId: string | null, limit: number | null) =>
+    [...pluginsAllKey, "auditLogs", pluginId, limit] as const,
+  runtimeReports: (
+    pluginId: string | null,
+    hookName: string | null,
+    traceId: string | null,
+    limit: number | null
+  ) => [...pluginsAllKey, "runtimeReports", pluginId, hookName, traceId, limit] as const,
+  extensionRuntimeReportsRoot: () => [...pluginsAllKey, "extensionRuntimeReports"] as const,
+  extensionRuntimeReports: (
+    pluginId: string | null,
+    contributionType: string | null,
+    contributionId: string | null,
+    traceId: string | null,
+    limit: number | null
+  ) =>
+    [
+      ...pluginsAllKey,
+      "extensionRuntimeReports",
+      pluginId,
+      contributionType,
+      contributionId,
+      traceId,
+      limit,
+    ] as const,
+  replayFixture: (traceId: string | null, hookName: string | null, pluginId: string | null) =>
+    [...pluginsAllKey, "replayFixture", traceId, hookName, pluginId] as const,
+};
+
+const pluginContributionsAllKey = ["pluginContributions"] as const;
+export const pluginContributionKeys = {
+  all: pluginContributionsAllKey,
+  active: () => [...pluginContributionsAllKey, "active"] as const,
+};
+
 const settingsAllKey = ["settings"] as const;
 export const settingsKeys = {
   all: settingsAllKey,
@@ -241,6 +278,7 @@ export const settingsKeys = {
 };
 
 const cliManagerAllKey = ["cliManager"] as const;
+const codexModelCatalogAllKey = [...cliManagerAllKey, "codex", "modelCatalog"] as const;
 export const cliManagerKeys = {
   all: cliManagerAllKey,
   claudeInfo: () => [...cliManagerAllKey, "claude", "info"] as const,
@@ -249,15 +287,27 @@ export const cliManagerKeys = {
   codexInfo: () => [...cliManagerAllKey, "codex", "info"] as const,
   codexConfig: () => [...cliManagerAllKey, "codex", "config"] as const,
   codexConfigToml: () => [...cliManagerAllKey, "codex", "configToml"] as const,
+  codexModelCatalog: (snapshot?: {
+    configPath?: string | null;
+    executablePath?: string | null;
+    cliVersion?: string | null;
+  }) =>
+    [
+      ...codexModelCatalogAllKey,
+      snapshot?.configPath ?? null,
+      snapshot?.executablePath ?? null,
+      snapshot?.cliVersion ?? null,
+    ] as const,
   geminiInfo: () => [...cliManagerAllKey, "gemini", "info"] as const,
   geminiConfig: () => [...cliManagerAllKey, "gemini", "config"] as const,
+  grokInfo: () => [...cliManagerAllKey, "grok", "info"] as const,
+  grokConfig: () => [...cliManagerAllKey, "grok", "config"] as const,
 };
 
 const modelPricesAllKey = ["modelPrices"] as const;
 export const modelPricesKeys = {
   all: modelPricesAllKey,
   lists: () => [...modelPricesAllKey, "list"] as const,
-  list: (cliKey: CliKey) => [...modelPricesAllKey, "list", cliKey] as const,
   aliases: () => [...modelPricesAllKey, "aliases"] as const,
 };
 
@@ -271,6 +321,7 @@ const cliProxyAllKey = ["cliProxy"] as const;
 export const cliProxyKeys = {
   all: cliProxyAllKey,
   statusAll: () => [...cliProxyAllKey, "statusAll"] as const,
+  envConflicts: (cliKey: CliKey) => [...cliProxyAllKey, "envConflicts", cliKey] as const,
 };
 
 const appAboutAllKey = ["appAbout"] as const;

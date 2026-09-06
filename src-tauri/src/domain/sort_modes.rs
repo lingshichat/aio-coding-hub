@@ -238,9 +238,40 @@ WHERE id = ?1
     .map_err(|e| db_err!("failed to query sort_mode: {e}"))
 }
 
-pub fn delete_mode(db: &db::Db, mode_id: i64) -> crate::shared::error::AppResult<()> {
+pub fn delete_mode_with_affected_cli_keys(
+    db: &db::Db,
+    mode_id: i64,
+) -> crate::shared::error::AppResult<Vec<String>> {
     let conn = db.open_connection()?;
     ensure_mode_exists(&conn, mode_id)?;
+
+    let mut stmt = conn
+        .prepare_cached(
+            r#"
+SELECT cli_key
+FROM (
+  SELECT cli_key
+  FROM sort_mode_active
+  WHERE mode_id = ?1
+  UNION
+  SELECT cli_key
+  FROM sort_mode_providers
+  WHERE mode_id = ?1
+)
+ORDER BY cli_key ASC
+"#,
+        )
+        .map_err(|e| db_err!("failed to prepare active sort_mode query: {e}"))?;
+    let rows = stmt
+        .query_map(params![mode_id], |row| row.get::<_, String>(0))
+        .map_err(|e| db_err!("failed to query active sort_mode cli keys: {e}"))?;
+
+    let mut affected_cli_keys = Vec::new();
+    for row in rows {
+        affected_cli_keys
+            .push(row.map_err(|e| db_err!("failed to read active sort_mode cli key: {e}"))?);
+    }
+    drop(stmt);
 
     let changed = conn
         .execute("DELETE FROM sort_modes WHERE id = ?1", params![mode_id])
@@ -248,6 +279,11 @@ pub fn delete_mode(db: &db::Db, mode_id: i64) -> crate::shared::error::AppResult
     if changed == 0 {
         return Err("DB_NOT_FOUND: sort_mode not found".to_string().into());
     }
+    Ok(affected_cli_keys)
+}
+
+pub fn delete_mode(db: &db::Db, mode_id: i64) -> crate::shared::error::AppResult<()> {
+    delete_mode_with_affected_cli_keys(db, mode_id)?;
     Ok(())
 }
 
@@ -495,6 +531,7 @@ INSERT INTO sort_mode_providers(
 
     tx.commit()
         .map_err(|e| db_err!("failed to commit transaction: {e}"))?;
+    drop(conn);
 
     list_mode_providers(db, mode_id, cli_key)
 }
@@ -554,4 +591,89 @@ WHERE mode_id = ?1
         },
     )
     .map_err(|e| db_err!("failed to read sort_mode_provider: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::providers::{
+        DailyResetMode, ProviderAuthMode, ProviderBaseUrlMode, ProviderUpsertParams,
+    };
+    use rusqlite::params;
+
+    fn insert_provider(db: &db::Db, cli_key: &str, name: &str) -> i64 {
+        crate::providers::upsert(
+            db,
+            ProviderUpsertParams {
+                provider_id: None,
+                cli_key: cli_key.to_string(),
+                name: name.to_string(),
+                base_urls: vec!["https://api.example.com".to_string()],
+                base_url_mode: ProviderBaseUrlMode::Order,
+                auth_mode: Some(ProviderAuthMode::ApiKey),
+                api_key: Some("sk-test".to_string()),
+                enabled: true,
+                cost_multiplier: 1.0,
+                priority: Some(100),
+                claude_models: None,
+                model_policy: None,
+                limit_5h_usd: None,
+                limit_daily_usd: None,
+                daily_reset_mode: Some(DailyResetMode::Fixed),
+                daily_reset_time: Some("00:00:00".to_string()),
+                limit_weekly_usd: None,
+                limit_monthly_usd: None,
+                limit_total_usd: None,
+                tags: None,
+                note: None,
+                source_provider_id: None,
+                bridge_type: None,
+                stream_idle_timeout_seconds: None,
+                extension_values: None,
+            },
+        )
+        .expect("insert provider")
+        .id
+    }
+
+    fn active_mode_id(db: &db::Db, cli_key: &str) -> Option<i64> {
+        let conn = db.open_connection().expect("open db");
+        conn.query_row(
+            "SELECT mode_id FROM sort_mode_active WHERE cli_key = ?1",
+            params![cli_key],
+            |row| row.get::<_, Option<i64>>(0),
+        )
+        .expect("read active mode")
+    }
+
+    #[test]
+    fn delete_mode_returns_active_cli_keys_before_fk_nulls_active_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db_path = dir.path().join("sort_mode_delete_active_cli_keys.db");
+        let db = db::init_for_tests(&db_path).expect("init db");
+
+        let deleted_mode = create_mode(&db, "Review Mode").expect("create deleted mode");
+        let other_mode = create_mode(&db, "Other Mode").expect("create other mode");
+        set_active(&db, "claude", Some(deleted_mode.id)).expect("activate claude");
+        set_active(&db, "codex", Some(deleted_mode.id)).expect("activate codex");
+        set_active(&db, "gemini", Some(other_mode.id)).expect("activate gemini");
+        let gemini_provider_id = insert_provider(&db, "gemini", "Gemini In Deleted Mode");
+        set_mode_providers_order(&db, deleted_mode.id, "gemini", vec![gemini_provider_id])
+            .expect("configure inactive gemini route");
+
+        let affected_cli_keys =
+            delete_mode_with_affected_cli_keys(&db, deleted_mode.id).expect("delete mode");
+
+        assert_eq!(
+            affected_cli_keys,
+            vec![
+                "claude".to_string(),
+                "codex".to_string(),
+                "gemini".to_string()
+            ]
+        );
+        assert_eq!(active_mode_id(&db, "claude"), None);
+        assert_eq!(active_mode_id(&db, "codex"), None);
+        assert_eq!(active_mode_id(&db, "gemini"), Some(other_mode.id));
+    }
 }

@@ -11,6 +11,7 @@ pub(crate) fn create_builder() -> tauri::Builder<tauri::Wry> {
         .manage(resident::ResidentState::default())
         .manage(StartupState::default())
         .manage(crate::app::heartbeat_watchdog::HeartbeatWatchdogState::default())
+        .manage(crate::app::plugins::extension_host_registry::ExtensionHostRuntimeState::default())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -26,4 +27,18 @@ pub(crate) fn create_builder() -> tauri::Builder<tauri::Wry> {
         .plugin(tauri_plugin_window_state::Builder::default().build());
 
     builder
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn desktop_builder_keeps_single_instance_registration() {
+        let source = std::fs::read_to_string(file!()).expect("read plugin registry source");
+        let needle = ["tauri_plugin_", "single_", "instance::", "init"].concat();
+
+        assert!(
+            source.contains("#[cfg(desktop)]") && source.contains(&needle),
+            "startup request-log reconciliation relies on desktop single-instance ownership"
+        );
+    }
 }

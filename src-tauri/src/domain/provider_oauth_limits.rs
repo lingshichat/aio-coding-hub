@@ -17,6 +17,7 @@ pub(crate) struct OAuthLimitSnapshotInput<'a> {
     pub limit_weekly_text: Option<&'a str>,
     pub limit_5h_reset_at: Option<i64>,
     pub limit_weekly_reset_at: Option<i64>,
+    pub reset_credit_available_count: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -31,6 +32,7 @@ struct OAuthLimitSnapshot {
     limit_weekly_text: Option<String>,
     limit_5h_reset_at: Option<i64>,
     limit_weekly_reset_at: Option<i64>,
+    reset_credit_available_count: Option<i64>,
     checked_at: i64,
 }
 
@@ -57,6 +59,10 @@ fn normalize_text(input: Option<&str>, max_chars: usize) -> Option<String> {
 
 fn normalize_reset_at(input: Option<i64>) -> Option<i64> {
     input.filter(|value| *value > 0)
+}
+
+fn normalize_reset_credit_available_count(input: Option<i64>) -> Option<i64> {
+    input.filter(|value| *value >= 0)
 }
 
 fn update_latest(latest: &mut Option<i64>, candidate: i64) {
@@ -144,6 +150,8 @@ pub(crate) fn save_snapshot(db: &db::Db, input: OAuthLimitSnapshotInput<'_>) -> 
     let limit_weekly_text = normalize_text(input.limit_weekly_text, TEXT_MAX_CHARS);
     let limit_5h_reset_at = normalize_reset_at(input.limit_5h_reset_at);
     let limit_weekly_reset_at = normalize_reset_at(input.limit_weekly_reset_at);
+    let reset_credit_available_count =
+        normalize_reset_credit_available_count(input.reset_credit_available_count);
 
     conn.execute(
         r#"
@@ -154,15 +162,17 @@ INSERT INTO provider_oauth_limit_snapshots(
   limit_weekly_text,
   limit_5h_reset_at,
   limit_weekly_reset_at,
+  reset_credit_available_count,
   checked_at,
   updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?8)
 ON CONFLICT(provider_id) DO UPDATE SET
   limit_short_label = excluded.limit_short_label,
   limit_5h_text = excluded.limit_5h_text,
   limit_weekly_text = excluded.limit_weekly_text,
   limit_5h_reset_at = excluded.limit_5h_reset_at,
   limit_weekly_reset_at = excluded.limit_weekly_reset_at,
+  reset_credit_available_count = excluded.reset_credit_available_count,
   checked_at = excluded.checked_at,
   updated_at = excluded.updated_at
 "#,
@@ -173,6 +183,7 @@ ON CONFLICT(provider_id) DO UPDATE SET
             limit_weekly_text,
             limit_5h_reset_at,
             limit_weekly_reset_at,
+            reset_credit_available_count,
             now
         ],
     )
@@ -187,19 +198,23 @@ pub(crate) fn save_exhausted_snapshot(
     reset_at: Option<i64>,
 ) -> AppResult<()> {
     let now = now_unix_seconds();
+    let existing_snapshot = {
+        let conn = db.open_connection()?;
+        read_snapshot(&conn, provider_id)?
+    };
     let effective_reset_at = match reset_at {
         Some(reset_at) => Some(reset_at),
-        None => {
-            let conn = db.open_connection()?;
-            read_snapshot(&conn, provider_id)?.and_then(|snapshot| {
-                [snapshot.limit_5h_reset_at, snapshot.limit_weekly_reset_at]
-                    .into_iter()
-                    .flatten()
-                    .filter(|candidate| *candidate > now)
-                    .max()
-            })
-        }
+        None => existing_snapshot.as_ref().and_then(|snapshot| {
+            [snapshot.limit_5h_reset_at, snapshot.limit_weekly_reset_at]
+                .into_iter()
+                .flatten()
+                .filter(|candidate| *candidate > now)
+                .max()
+        }),
     };
+    let reset_credit_available_count = existing_snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.reset_credit_available_count);
 
     save_snapshot(
         db,
@@ -210,6 +225,7 @@ pub(crate) fn save_exhausted_snapshot(
             limit_weekly_text: None,
             limit_5h_reset_at: effective_reset_at,
             limit_weekly_reset_at: None,
+            reset_credit_available_count,
         },
     )
 }
@@ -234,6 +250,7 @@ SELECT
   limit_weekly_text,
   limit_5h_reset_at,
   limit_weekly_reset_at,
+  reset_credit_available_count,
   checked_at
 FROM provider_oauth_limit_snapshots
 WHERE provider_id = ?1
@@ -245,7 +262,8 @@ WHERE provider_id = ?1
                 limit_weekly_text: row.get(1)?,
                 limit_5h_reset_at: row.get(2)?,
                 limit_weekly_reset_at: row.get(3)?,
-                checked_at: row.get(4)?,
+                reset_credit_available_count: row.get(4)?,
+                checked_at: row.get(5)?,
             })
         },
     )
@@ -303,6 +321,7 @@ CREATE TABLE provider_oauth_limit_snapshots (
   limit_weekly_text TEXT,
   limit_5h_reset_at INTEGER,
   limit_weekly_reset_at INTEGER,
+  reset_credit_available_count INTEGER,
   checked_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
@@ -328,9 +347,10 @@ INSERT INTO provider_oauth_limit_snapshots(
   limit_weekly_text,
   limit_5h_reset_at,
   limit_weekly_reset_at,
+  reset_credit_available_count,
   checked_at,
   updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+) VALUES (?1, ?2, ?3, ?4, ?5, NULL, ?6, ?6)
 "#,
             params![
                 provider_id,
@@ -345,12 +365,16 @@ INSERT INTO provider_oauth_limit_snapshots(
     }
 
     fn insert_test_provider(db: &db::Db) -> i64 {
+        insert_test_provider_named(db, "OAuth limit snapshot test")
+    }
+
+    fn insert_test_provider_named(db: &db::Db, name: &str) -> i64 {
         crate::providers::upsert(
             db,
             crate::providers::ProviderUpsertParams {
                 provider_id: None,
                 cli_key: "codex".to_string(),
-                name: "OAuth limit snapshot test".to_string(),
+                name: name.to_string(),
                 base_urls: vec!["https://example.test".to_string()],
                 base_url_mode: crate::providers::ProviderBaseUrlMode::Order,
                 auth_mode: Some(crate::providers::ProviderAuthMode::ApiKey),
@@ -359,6 +383,7 @@ INSERT INTO provider_oauth_limit_snapshots(
                 cost_multiplier: 1.0,
                 priority: Some(0),
                 claude_models: None,
+                model_policy: None,
                 limit_5h_usd: None,
                 limit_daily_usd: None,
                 daily_reset_mode: None,
@@ -371,6 +396,7 @@ INSERT INTO provider_oauth_limit_snapshots(
                 source_provider_id: None,
                 bridge_type: None,
                 stream_idle_timeout_seconds: None,
+                extension_values: None,
             },
         )
         .expect("insert provider")
@@ -477,6 +503,7 @@ INSERT INTO provider_oauth_limit_snapshots(
                 limit_weekly_text: Some("80%"),
                 limit_5h_reset_at: None,
                 limit_weekly_reset_at: None,
+                reset_credit_available_count: Some(2),
             },
         )
         .expect("save refreshed snapshot");
@@ -503,6 +530,7 @@ INSERT INTO provider_oauth_limit_snapshots(
                 limit_weekly_text: Some("10%"),
                 limit_5h_reset_at: Some(now + 1_800),
                 limit_weekly_reset_at: Some(now + 86_400),
+                reset_credit_available_count: Some(5),
             },
         )
         .expect("save current snapshot");
@@ -516,6 +544,106 @@ INSERT INTO provider_oauth_limit_snapshots(
             OAuthLimitGate::Limited {
                 reset_at: Some(now + 86_400)
             }
+        );
+        let reset_count: Option<i64> = conn
+            .query_row(
+                "SELECT reset_credit_available_count FROM provider_oauth_limit_snapshots WHERE provider_id = ?1",
+                params![provider_id],
+                |row| row.get(0),
+            )
+            .expect("read reset count");
+        assert_eq!(reset_count, Some(5));
+    }
+
+    #[test]
+    fn save_snapshot_persists_reset_credit_available_count_per_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db =
+            db::init_for_tests(&dir.path().join("oauth-limits-reset-count.db")).expect("init db");
+        let first_provider_id = insert_test_provider_named(&db, "OAuth limit snapshot test 1");
+        let second_provider_id = insert_test_provider_named(&db, "OAuth limit snapshot test 2");
+
+        save_snapshot(
+            &db,
+            OAuthLimitSnapshotInput {
+                provider_id: first_provider_id,
+                limit_short_label: Some("5h"),
+                limit_5h_text: Some("25%"),
+                limit_weekly_text: Some("80%"),
+                limit_5h_reset_at: None,
+                limit_weekly_reset_at: None,
+                reset_credit_available_count: Some(4),
+            },
+        )
+        .expect("save first snapshot");
+        save_snapshot(
+            &db,
+            OAuthLimitSnapshotInput {
+                provider_id: second_provider_id,
+                limit_short_label: Some("5h"),
+                limit_5h_text: Some("90%"),
+                limit_weekly_text: Some("95%"),
+                limit_5h_reset_at: None,
+                limit_weekly_reset_at: None,
+                reset_credit_available_count: Some(1),
+            },
+        )
+        .expect("save second snapshot");
+
+        let conn = db.open_connection().expect("open");
+        let first_count: Option<i64> = conn
+            .query_row(
+                "SELECT reset_credit_available_count FROM provider_oauth_limit_snapshots WHERE provider_id = ?1",
+                params![first_provider_id],
+                |row| row.get(0),
+            )
+            .expect("read first count");
+        let second_count: Option<i64> = conn
+            .query_row(
+                "SELECT reset_credit_available_count FROM provider_oauth_limit_snapshots WHERE provider_id = ?1",
+                params![second_provider_id],
+                |row| row.get(0),
+            )
+            .expect("read second count");
+
+        assert_eq!(first_count, Some(4));
+        assert_eq!(second_count, Some(1));
+    }
+
+    #[test]
+    fn acceptance_oauth_exhausted_snapshot_is_scoped_to_provider() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let db = db::init_for_tests(&dir.path().join("oauth-limits-scope.db")).expect("init db");
+        let now = now_unix_seconds();
+        let exhausted_provider_id = insert_test_provider_named(&db, "OAuth exhausted");
+        let healthy_provider_id = insert_test_provider_named(&db, "OAuth healthy");
+
+        save_exhausted_snapshot(&db, exhausted_provider_id, Some(now + 3_600))
+            .expect("save exhausted snapshot");
+        save_snapshot(
+            &db,
+            OAuthLimitSnapshotInput {
+                provider_id: healthy_provider_id,
+                limit_short_label: Some("5h"),
+                limit_5h_text: Some("25%"),
+                limit_weekly_text: Some("80%"),
+                limit_5h_reset_at: None,
+                limit_weekly_reset_at: None,
+                reset_credit_available_count: Some(3),
+            },
+        )
+        .expect("save healthy snapshot");
+
+        let conn = db.open_connection().expect("open");
+        assert_eq!(
+            gate_snapshot(&conn, exhausted_provider_id, now).expect("gate exhausted"),
+            OAuthLimitGate::Limited {
+                reset_at: Some(now + 3_600)
+            }
+        );
+        assert_eq!(
+            gate_snapshot(&conn, healthy_provider_id, now).expect("gate healthy"),
+            OAuthLimitGate::Allow
         );
     }
 }

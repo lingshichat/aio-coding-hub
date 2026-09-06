@@ -1,12 +1,13 @@
 //! Database CRUD operations for providers.
 
+use super::model_policy::{ProviderModelPolicyStatus, ProviderModelPolicyV1};
 use super::types::*;
 use super::validation::*;
 use crate::db;
 use crate::shared::error::db_err;
 use crate::shared::sqlite::enabled_to_int;
 use crate::shared::time::now_unix_seconds;
-use rusqlite::{params, params_from_iter, Connection, OptionalExtension};
+use rusqlite::{params, params_from_iter, Connection, OptionalExtension, Transaction};
 use std::collections::{HashMap, HashSet};
 
 fn decode_provider_row(
@@ -17,8 +18,11 @@ fn decode_provider_row(
     let base_urls_json: String = row.get("base_urls_json")?;
     let base_url_mode_raw: String = row.get("base_url_mode")?;
     let claude_models_json: String = row.get("claude_models_json")?;
+    let model_policy_json: Option<String> = row.get("model_policy_json")?;
     let daily_reset_mode_raw: String = row.get("daily_reset_mode")?;
     let daily_reset_time_raw: String = row.get("daily_reset_time")?;
+    let (model_policy, model_policy_status) =
+        ProviderModelPolicyV1::decode(model_policy_json.as_deref(), cli_key);
 
     Ok(DecodedProviderRow {
         id: row.get("id")?,
@@ -31,6 +35,8 @@ fn decode_provider_row(
         } else {
             ClaudeModels::default()
         },
+        model_policy,
+        model_policy_status,
         limit_5h_usd: row.get("limit_5h_usd")?,
         limit_daily_usd: row.get("limit_daily_usd")?,
         daily_reset_mode: DailyResetMode::parse(&daily_reset_mode_raw)
@@ -44,7 +50,7 @@ fn decode_provider_row(
             .unwrap_or_else(|| "api_key".to_string()),
         oauth_provider_type: row.get("oauth_provider_type")?,
         source_provider_id: row.get("source_provider_id")?,
-        bridge_type: row.get("bridge_type").unwrap_or(None),
+        bridge_type: row.get("bridge_type")?,
     })
 }
 
@@ -60,6 +66,8 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> Result<ProviderSummary, rusqlite::
         base_urls: decoded.base_urls,
         base_url_mode: decoded.base_url_mode,
         claude_models: decoded.claude_models,
+        model_policy: decoded.model_policy,
+        model_policy_status: decoded.model_policy_status,
         enabled: row.get::<_, i64>("enabled")? != 0,
         priority: row.get("priority")?,
         cost_multiplier: row.get("cost_multiplier")?,
@@ -82,22 +90,323 @@ fn row_to_summary(row: &rusqlite::Row<'_>) -> Result<ProviderSummary, rusqlite::
         source_provider_id: decoded.source_provider_id,
         bridge_type: decoded.bridge_type,
         stream_idle_timeout_seconds: parse_positive_optional_u32(
-            row.get("stream_idle_timeout_seconds").unwrap_or(None),
+            row.get("stream_idle_timeout_seconds")?,
         ),
+        extension_values: Vec::new(),
         api_key_configured: row
-            .get::<_, Option<i64>>("api_key_configured")
-            .unwrap_or(None)
+            .get::<_, Option<i64>>("api_key_configured")?
             .unwrap_or(0)
             != 0,
     })
+}
+
+fn list_extension_values(
+    conn: &Connection,
+    provider_id: i64,
+) -> crate::shared::error::AppResult<Vec<ProviderExtensionValues>> {
+    let mut stmt = conn
+        .prepare_cached(
+            r#"
+SELECT
+  plugin_id,
+  namespace,
+  values_json,
+  updated_at
+FROM provider_extension_values
+WHERE provider_id = ?1
+ORDER BY plugin_id ASC, namespace ASC
+"#,
+        )
+        .map_err(|e| db_err!("failed to prepare provider extension values query: {e}"))?;
+
+    let rows = stmt
+        .query_map(params![provider_id], |row| {
+            let values_json: String = row.get("values_json")?;
+            let values = serde_json::from_str::<serde_json::Value>(&values_json)
+                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+
+            Ok(ProviderExtensionValues {
+                plugin_id: row.get("plugin_id")?,
+                namespace: row.get("namespace")?,
+                values,
+                updated_at: row.get("updated_at")?,
+            })
+        })
+        .map_err(|e| db_err!("failed to list provider extension values: {e}"))?;
+
+    let mut values = Vec::new();
+    for row in rows {
+        values.push(row.map_err(|e| db_err!("failed to read provider extension value: {e}"))?);
+    }
+    Ok(values)
+}
+
+fn fill_summary_extension_values(
+    conn: &Connection,
+    summary: &mut ProviderSummary,
+) -> crate::shared::error::AppResult<()> {
+    summary.extension_values = list_extension_values(conn, summary.id)?;
+    Ok(())
+}
+
+fn fill_gateway_extension_values(
+    conn: &Connection,
+    provider: &mut ProviderForGateway,
+) -> crate::shared::error::AppResult<()> {
+    provider.extension_values = list_extension_values(conn, provider.id)?;
+    Ok(())
+}
+
+fn replace_extension_values(
+    conn: &Connection,
+    provider_id: i64,
+    values: Option<&[ProviderExtensionValuesInput]>,
+) -> crate::shared::error::AppResult<bool> {
+    let Some(values) = values else {
+        return Ok(false);
+    };
+
+    conn.execute(
+        "DELETE FROM provider_extension_values WHERE provider_id = ?1",
+        params![provider_id],
+    )
+    .map_err(|e| db_err!("failed to clear provider extension values: {e}"))?;
+
+    let now = now_unix_seconds();
+    for value in values {
+        let plugin_id = value.plugin_id.trim();
+        if plugin_id.is_empty() {
+            return Err("SEC_INVALID_INPUT: extension_values.plugin_id is required"
+                .to_string()
+                .into());
+        }
+
+        let namespace = value.namespace.trim();
+        if namespace.is_empty() {
+            return Err("SEC_INVALID_INPUT: extension_values.namespace is required"
+                .to_string()
+                .into());
+        }
+
+        let values_json =
+            serde_json::to_string(&value.values).map_err(|e| format!("SYSTEM_ERROR: {e}"))?;
+
+        conn.execute(
+            r#"
+INSERT INTO provider_extension_values(
+  provider_id,
+  plugin_id,
+  namespace,
+  values_json,
+  updated_at
+) VALUES (?1, ?2, ?3, ?4, ?5)
+ON CONFLICT(provider_id, plugin_id, namespace) DO UPDATE SET
+  values_json = excluded.values_json,
+  updated_at = excluded.updated_at
+"#,
+            params![provider_id, plugin_id, namespace, values_json, now],
+        )
+        .map_err(|e| db_err!("failed to save provider extension values: {e}"))?;
+    }
+
+    Ok(true)
+}
+
+pub(crate) fn copy_extension_values(
+    conn: &Connection,
+    from_provider_id: i64,
+    to_provider_id: i64,
+) -> crate::shared::error::AppResult<()> {
+    let now = now_unix_seconds();
+    conn.execute(
+        r#"
+INSERT INTO provider_extension_values(
+  provider_id,
+  plugin_id,
+  namespace,
+  values_json,
+  updated_at
+)
+SELECT
+  ?2,
+  plugin_id,
+  namespace,
+  values_json,
+  ?3
+FROM provider_extension_values
+WHERE provider_id = ?1
+ON CONFLICT(provider_id, plugin_id, namespace) DO UPDATE SET
+  values_json = excluded.values_json,
+  updated_at = excluded.updated_at
+"#,
+        params![from_provider_id, to_provider_id, now],
+    )
+    .map_err(|e| db_err!("failed to copy provider extension values: {e}"))?;
+
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn insert_provider(
+    tx: &Transaction<'_>,
+    cli_key: &str,
+    name: &str,
+    base_urls: &[String],
+    base_url_mode: ProviderBaseUrlMode,
+    requested_auth_mode: ProviderAuthMode,
+    api_key: Option<&str>,
+    enabled: bool,
+    cost_multiplier: f64,
+    priority: Option<i64>,
+    claude_models: Option<ClaudeModels>,
+    model_policy: Option<ProviderModelPolicyV1>,
+    limit_5h_usd: Option<f64>,
+    limit_daily_usd: Option<f64>,
+    daily_reset_mode: Option<DailyResetMode>,
+    daily_reset_time: Option<String>,
+    limit_weekly_usd: Option<f64>,
+    limit_monthly_usd: Option<f64>,
+    limit_total_usd: Option<f64>,
+    tags: Option<Vec<String>>,
+    note: Option<String>,
+    source_provider_id: Option<i64>,
+    bridge_type: Option<String>,
+    stream_idle_timeout_seconds: Option<u32>,
+    extension_values: Option<&[ProviderExtensionValuesInput]>,
+) -> crate::shared::error::AppResult<i64> {
+    let now = now_unix_seconds();
+    let priority = priority.unwrap_or(DEFAULT_PRIORITY);
+    let is_oauth = requested_auth_mode == ProviderAuthMode::Oauth;
+    let is_cx2cc = is_cx2cc_bridge(source_provider_id, bridge_type.as_deref());
+    let api_key = match is_oauth || is_cx2cc {
+        true => api_key.unwrap_or(""),
+        false => api_key.ok_or_else(|| "SEC_INVALID_INPUT: api_key is required".to_string())?,
+    };
+    let sort_order = next_sort_order(tx, cli_key)?;
+
+    let claude_models = if cli_key == "claude" {
+        let input = claude_models.unwrap_or_default();
+        validate_claude_models(&input)?;
+        input.normalized()
+    } else {
+        ClaudeModels::default()
+    };
+    let claude_models_json =
+        serde_json::to_string(&claude_models).map_err(|e| format!("SYSTEM_ERROR: {e}"))?;
+    let model_policy_json = match model_policy {
+        Some(policy) => Some(policy.normalized()?.to_json()?),
+        None if cli_key == "claude" => None,
+        None => Some(ProviderModelPolicyV1::all().to_json()?),
+    };
+
+    let limit_5h_usd = validate_limit_usd("limit_5h_usd", limit_5h_usd)?;
+    let limit_daily_usd = validate_limit_usd("limit_daily_usd", limit_daily_usd)?;
+    let limit_weekly_usd = validate_limit_usd("limit_weekly_usd", limit_weekly_usd)?;
+    let limit_monthly_usd = validate_limit_usd("limit_monthly_usd", limit_monthly_usd)?;
+    let limit_total_usd = validate_limit_usd("limit_total_usd", limit_total_usd)?;
+
+    let daily_reset_mode = daily_reset_mode.unwrap_or(DailyResetMode::Fixed);
+    let daily_reset_time_raw = daily_reset_time.as_deref().unwrap_or("00:00:00");
+    let daily_reset_time =
+        normalize_reset_time_hms_strict("daily_reset_time", daily_reset_time_raw)?;
+
+    let tags_normalized = normalize_tags(tags.unwrap_or_default());
+    let tags_json_value =
+        serde_json::to_string(&tags_normalized).map_err(|e| format!("SYSTEM_ERROR: {e}"))?;
+    let note_value = normalize_note(note.as_deref())?;
+
+    let base_url_primary = base_urls.first().cloned().unwrap_or_default();
+    let base_urls_json =
+        serde_json::to_string(base_urls).map_err(|e| format!("SYSTEM_ERROR: {e}"))?;
+
+    tx.execute(
+        r#"
+INSERT INTO providers(
+  cli_key,
+  name,
+  base_url,
+  base_urls_json,
+  base_url_mode,
+  auth_mode,
+  claude_models_json,
+  model_policy_json,
+  supported_models_json,
+  model_mapping_json,
+  api_key_plaintext,
+  sort_order,
+  enabled,
+  priority,
+  cost_multiplier,
+  limit_5h_usd,
+  limit_daily_usd,
+  daily_reset_mode,
+  daily_reset_time,
+  limit_weekly_usd,
+  limit_monthly_usd,
+  limit_total_usd,
+  tags_json,
+  note,
+  source_provider_id,
+  bridge_type,
+  stream_idle_timeout_seconds,
+  created_at,
+  updated_at
+) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, '{}', '{}', ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)
+"#,
+        params![
+            cli_key,
+            name,
+            base_url_primary,
+            base_urls_json,
+            base_url_mode.as_str(),
+            requested_auth_mode.as_str(),
+            claude_models_json,
+            model_policy_json,
+            api_key,
+            sort_order,
+            enabled_to_int(enabled),
+            priority,
+            cost_multiplier,
+            limit_5h_usd,
+            limit_daily_usd,
+            daily_reset_mode.as_str(),
+            daily_reset_time,
+            limit_weekly_usd,
+            limit_monthly_usd,
+            limit_total_usd,
+            tags_json_value,
+            note_value,
+            source_provider_id,
+            bridge_type,
+            stream_idle_timeout_seconds,
+            now,
+            now
+        ],
+    )
+    .map_err(|e| match e {
+        rusqlite::Error::SqliteFailure(err, _)
+            if err.code == rusqlite::ErrorCode::ConstraintViolation =>
+        {
+            crate::shared::error::AppError::new(
+                "DB_CONSTRAINT",
+                format!("provider already exists for cli_key={cli_key}, name={name}"),
+            )
+        }
+        other => db_err!("failed to insert provider: {other}"),
+    })?;
+
+    let id = tx.last_insert_rowid();
+    replace_extension_values(tx, id, extension_values)?;
+    Ok(id)
 }
 
 pub(crate) fn get_by_id(
     conn: &Connection,
     provider_id: i64,
 ) -> crate::shared::error::AppResult<ProviderSummary> {
-    conn.query_row(
-        r#"
+    let mut summary = conn
+        .query_row(
+            r#"
 SELECT
   id,
   cli_key,
@@ -106,6 +415,7 @@ SELECT
   base_urls_json,
   base_url_mode,
   claude_models_json,
+  model_policy_json,
   tags_json,
   note,
   enabled,
@@ -132,12 +442,15 @@ SELECT
 FROM providers
 WHERE id = ?1
 "#,
-        params![provider_id],
-        row_to_summary,
-    )
-    .optional()
-    .map_err(|e| db_err!("failed to query provider: {e}"))?
-    .ok_or_else(|| crate::shared::error::AppError::from("DB_NOT_FOUND: provider not found"))
+            params![provider_id],
+            row_to_summary,
+        )
+        .optional()
+        .map_err(|e| db_err!("failed to query provider: {e}"))?
+        .ok_or_else(|| crate::shared::error::AppError::from("DB_NOT_FOUND: provider not found"))?;
+
+    fill_summary_extension_values(conn, &mut summary)?;
+    Ok(summary)
 }
 
 pub(crate) fn claude_terminal_launch_context(
@@ -363,6 +676,7 @@ SELECT
   base_urls_json,
   base_url_mode,
   claude_models_json,
+  model_policy_json,
   tags_json,
   note,
   enabled,
@@ -388,7 +702,16 @@ SELECT
   CASE WHEN COALESCE(api_key_plaintext, '') = '' THEN 0 ELSE 1 END AS api_key_configured
 FROM providers
 WHERE cli_key = ?1
-ORDER BY sort_order ASC, id DESC
+ORDER BY
+  COALESCE(
+    (SELECT po.sort_order
+     FROM provider_pool_order po
+     WHERE po.cli_key = providers.cli_key
+       AND po.provider_id = providers.id),
+    9223372036854775807
+  ) ASC,
+  sort_order ASC,
+  id DESC
 "#,
         )
         .map_err(|e| db_err!("failed to prepare query: {e}"))?;
@@ -399,7 +722,9 @@ ORDER BY sort_order ASC, id DESC
 
     let mut items = Vec::new();
     for row in rows {
-        items.push(row.map_err(|e| db_err!("failed to read provider row: {e}"))?);
+        let mut item = row.map_err(|e| db_err!("failed to read provider row: {e}"))?;
+        fill_summary_extension_values(&conn, &mut item)?;
+        items.push(item);
     }
 
     Ok(items)
@@ -420,6 +745,8 @@ fn map_gateway_provider_row(
         base_url_mode: decoded.base_url_mode,
         api_key_plaintext: row.get("api_key_plaintext")?,
         claude_models: decoded.claude_models,
+        model_policy: decoded.model_policy,
+        model_policy_status: decoded.model_policy_status,
         limit_5h_usd: decoded.limit_5h_usd,
         limit_daily_usd: decoded.limit_daily_usd,
         daily_reset_mode: decoded.daily_reset_mode,
@@ -432,8 +759,9 @@ fn map_gateway_provider_row(
         source_provider_id: decoded.source_provider_id,
         bridge_type: decoded.bridge_type,
         stream_idle_timeout_seconds: parse_positive_optional_u32(
-            row.get("stream_idle_timeout_seconds").unwrap_or(None),
+            row.get("stream_idle_timeout_seconds")?,
         ),
+        extension_values: Vec::new(),
     })
 }
 
@@ -454,6 +782,7 @@ SELECT
   p.base_url_mode,
   p.api_key_plaintext,
   p.claude_models_json,
+  p.model_policy_json,
   p.limit_5h_usd,
   p.limit_daily_usd,
   p.daily_reset_mode,
@@ -485,7 +814,9 @@ ORDER BY mp.sort_order ASC
 
     let mut items = Vec::new();
     for row in rows {
-        items.push(row.map_err(|e| db_err!("failed to read gateway provider row: {e}"))?);
+        let mut item = row.map_err(|e| db_err!("failed to read gateway provider row: {e}"))?;
+        fill_gateway_extension_values(conn, &mut item)?;
+        items.push(item);
     }
     Ok(items)
 }
@@ -506,6 +837,7 @@ SELECT
   base_url_mode,
   api_key_plaintext,
   claude_models_json,
+  model_policy_json,
   limit_5h_usd,
   limit_daily_usd,
   daily_reset_mode,
@@ -521,7 +853,17 @@ SELECT
 FROM providers
 WHERE cli_key = ?1
   AND enabled = 1
-ORDER BY sort_order ASC, id DESC
+  AND EXISTS (
+    SELECT 1
+    FROM default_route_providers drp
+    WHERE drp.cli_key = providers.cli_key
+      AND drp.provider_id = providers.id
+  )
+ORDER BY
+  (SELECT drp.sort_order
+   FROM default_route_providers drp
+   WHERE drp.cli_key = providers.cli_key
+     AND drp.provider_id = providers.id) ASC
 "#,
         )
         .map_err(|e| db_err!("failed to prepare gateway provider query: {e}"))?;
@@ -534,7 +876,9 @@ ORDER BY sort_order ASC, id DESC
 
     let mut items = Vec::new();
     for row in rows {
-        items.push(row.map_err(|e| db_err!("failed to read gateway provider row: {e}"))?);
+        let mut item = row.map_err(|e| db_err!("failed to read gateway provider row: {e}"))?;
+        fill_gateway_extension_values(conn, &mut item)?;
+        items.push(item);
     }
     Ok(items)
 }
@@ -604,6 +948,57 @@ pub(crate) fn list_enabled_for_gateway_in_mode(
     }
 }
 
+pub(crate) fn list_ready_model_policies_for_configured_routes(
+    db: &db::Db,
+    cli_key: &str,
+) -> crate::shared::error::AppResult<Vec<ProviderModelPolicyV1>> {
+    validate_cli_key(cli_key)?;
+    let conn = db.open_connection()?;
+    let mut stmt = conn
+        .prepare_cached(
+            r#"
+SELECT p.model_policy_json
+FROM providers p
+WHERE p.cli_key = ?1
+  AND (
+    (
+      p.enabled = 1
+      AND EXISTS (
+        SELECT 1
+        FROM default_route_providers drp
+        WHERE drp.cli_key = p.cli_key
+          AND drp.provider_id = p.id
+      )
+    )
+    OR EXISTS (
+      SELECT 1
+      FROM sort_mode_providers smp
+      WHERE smp.cli_key = p.cli_key
+        AND smp.provider_id = p.id
+        AND smp.enabled = 1
+    )
+  )
+ORDER BY p.id ASC
+"#,
+        )
+        .map_err(|e| db_err!("failed to prepare configured route model policy query: {e}"))?;
+    let rows = stmt
+        .query_map(params![cli_key], |row| row.get::<_, Option<String>>(0))
+        .map_err(|e| db_err!("failed to query configured route model policies: {e}"))?;
+
+    let mut policies = Vec::new();
+    for row in rows {
+        let raw = row.map_err(|e| db_err!("failed to read configured route model policy: {e}"))?;
+        let (policy, status) = ProviderModelPolicyV1::decode(raw.as_deref(), cli_key);
+        if status == ProviderModelPolicyStatus::Ready {
+            if let Some(policy) = policy {
+                policies.push(policy);
+            }
+        }
+    }
+    Ok(policies)
+}
+
 /// Resolve a source provider by ID for CX2CC chaining.
 pub(crate) fn get_source_provider_for_gateway(
     db: &db::Db,
@@ -622,7 +1017,7 @@ pub(crate) fn get_source_provider_for_gateway(
             crate::shared::error::AppError::from("DB_NOT_FOUND: source provider not found")
         })?;
 
-    let provider = conn
+    let mut provider = conn
         .query_row(
             r#"
 SELECT
@@ -633,6 +1028,7 @@ SELECT
   base_url_mode,
   api_key_plaintext,
   claude_models_json,
+  model_policy_json,
   limit_5h_usd,
   limit_daily_usd,
   daily_reset_mode,
@@ -656,6 +1052,7 @@ WHERE id = ?1 AND enabled = 1 AND source_provider_id IS NULL AND cli_key = 'code
         .ok_or_else(|| {
             crate::shared::error::AppError::from("DB_NOT_FOUND: source provider not found")
         })?;
+    fill_gateway_extension_values(&conn, &mut provider)?;
     Ok((provider, cli_key_owned))
 }
 
@@ -666,6 +1063,64 @@ fn next_sort_order(conn: &Connection, cli_key: &str) -> crate::shared::error::Ap
         |row| row.get::<_, i64>(0),
     )
     .map_err(|e| db_err!("failed to query next sort_order: {e}"))
+}
+
+fn validate_source_provider(
+    db: &db::Db,
+    provider_id: Option<i64>,
+    source_provider_id: Option<i64>,
+) -> crate::shared::error::AppResult<()> {
+    let Some(source_id) = source_provider_id else {
+        return Ok(());
+    };
+
+    if provider_id == Some(source_id) {
+        return Err(
+            "SEC_INVALID_INPUT: source_provider_id cannot reference itself"
+                .to_string()
+                .into(),
+        );
+    }
+
+    let source_conn = db.open_connection()?;
+    let source_row: Option<(String, i64, Option<i64>)> = source_conn
+        .query_row(
+            "SELECT cli_key, enabled, source_provider_id FROM providers WHERE id = ?1",
+            params![source_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| db_err!("failed to validate source provider: {e}"))?;
+
+    match source_row {
+        None => Err(
+            "SEC_INVALID_INPUT: source_provider_id references a non-existent provider"
+                .to_string()
+                .into(),
+        ),
+        Some((ref src_cli, enabled, nested_source)) => {
+            if src_cli != "codex" {
+                return Err(
+                    "SEC_INVALID_INPUT: source provider must belong to codex CLI"
+                        .to_string()
+                        .into(),
+                );
+            }
+            if enabled == 0 {
+                return Err("SEC_INVALID_INPUT: source provider must be enabled"
+                    .to_string()
+                    .into());
+            }
+            if nested_source.is_some() {
+                return Err(
+                    "SEC_INVALID_INPUT: source provider cannot itself be a bridge provider"
+                        .to_string()
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+    }
 }
 
 pub fn upsert(
@@ -684,6 +1139,7 @@ pub fn upsert(
         cost_multiplier,
         priority,
         claude_models,
+        model_policy,
         limit_5h_usd,
         limit_daily_usd,
         daily_reset_mode,
@@ -696,6 +1152,7 @@ pub fn upsert(
         source_provider_id,
         bridge_type,
         stream_idle_timeout_seconds,
+        extension_values,
     } = input;
     let cli_key = cli_key.trim();
     validate_cli_key(cli_key)?;
@@ -710,6 +1167,14 @@ pub fn upsert(
     let requested_auth_mode = auth_mode.unwrap_or(ProviderAuthMode::ApiKey);
     let is_oauth = requested_auth_mode == ProviderAuthMode::Oauth;
 
+    if cli_key == "grok" && claude_models.as_ref().is_some_and(ClaudeModels::has_any) {
+        return Err(
+            "SEC_INVALID_INPUT: claude_models is only supported for cli_key=claude"
+                .to_string()
+                .into(),
+        );
+    }
+
     if let Some(ref bt) = bridge_type {
         if bt != CX2CC_BRIDGE_TYPE {
             return Err(format!("SEC_INVALID_INPUT: unsupported bridge_type: {bt}").into());
@@ -723,58 +1188,7 @@ pub fn upsert(
         None
     };
 
-    // Validate source_provider_id constraints for CX2CC bridging.
-    if let Some(source_id) = source_provider_id {
-        if let Some(pid) = provider_id {
-            if pid == source_id {
-                return Err(
-                    "SEC_INVALID_INPUT: source_provider_id cannot reference itself"
-                        .to_string()
-                        .into(),
-                );
-            }
-        }
-        let source_conn = db.open_connection()?;
-        let source_row: Option<(String, i64, Option<i64>)> = source_conn
-            .query_row(
-                "SELECT cli_key, enabled, source_provider_id FROM providers WHERE id = ?1",
-                params![source_id],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-            )
-            .optional()
-            .map_err(|e| db_err!("failed to validate source provider: {e}"))?;
-
-        match source_row {
-            None => {
-                return Err(
-                    "SEC_INVALID_INPUT: source_provider_id references a non-existent provider"
-                        .to_string()
-                        .into(),
-                );
-            }
-            Some((ref src_cli, enabled, nested_source)) => {
-                if src_cli != "codex" {
-                    return Err(
-                        "SEC_INVALID_INPUT: source provider must belong to codex CLI"
-                            .to_string()
-                            .into(),
-                    );
-                }
-                if enabled == 0 {
-                    return Err("SEC_INVALID_INPUT: source provider must be enabled"
-                        .to_string()
-                        .into());
-                }
-                if nested_source.is_some() {
-                    return Err(
-                        "SEC_INVALID_INPUT: source provider cannot itself be a bridge provider"
-                            .to_string()
-                            .into(),
-                    );
-                }
-            }
-        }
-    }
+    validate_source_provider(db, provider_id, source_provider_id)?;
 
     if is_cx2cc && cli_key != "claude" {
         return Err(
@@ -792,7 +1206,6 @@ pub fn upsert(
         normalize_base_urls(base_urls)?
     };
     let base_url_primary = base_urls.first().cloned().unwrap_or_default();
-
     let base_urls_json =
         serde_json::to_string(&base_urls).map_err(|e| format!("SYSTEM_ERROR: {e}"))?;
     let stream_idle_timeout_seconds_specified = stream_idle_timeout_seconds.is_some();
@@ -822,113 +1235,37 @@ pub fn upsert(
 
     match provider_id {
         None => {
-            let priority = priority.unwrap_or(DEFAULT_PRIORITY);
-            let api_key = match is_oauth || is_cx2cc {
-                true => api_key.unwrap_or(""),
-                false => {
-                    api_key.ok_or_else(|| "SEC_INVALID_INPUT: api_key is required".to_string())?
-                }
-            };
-            let sort_order = next_sort_order(&conn, cli_key)?;
-
-            let claude_models = if cli_key == "claude" {
-                claude_models.unwrap_or_default().normalized()
-            } else {
-                ClaudeModels::default()
-            };
-            let claude_models_json =
-                serde_json::to_string(&claude_models).map_err(|e| format!("SYSTEM_ERROR: {e}"))?;
-
-            let limit_5h_usd = validate_limit_usd("limit_5h_usd", limit_5h_usd)?;
-            let limit_daily_usd = validate_limit_usd("limit_daily_usd", limit_daily_usd)?;
-            let limit_weekly_usd = validate_limit_usd("limit_weekly_usd", limit_weekly_usd)?;
-            let limit_monthly_usd = validate_limit_usd("limit_monthly_usd", limit_monthly_usd)?;
-            let limit_total_usd = validate_limit_usd("limit_total_usd", limit_total_usd)?;
-
-            let daily_reset_mode = daily_reset_mode.unwrap_or(DailyResetMode::Fixed);
-            let daily_reset_time_raw = daily_reset_time.as_deref().unwrap_or("00:00:00");
-            let daily_reset_time =
-                normalize_reset_time_hms_strict("daily_reset_time", daily_reset_time_raw)?;
-
-            let tags_normalized = normalize_tags(tags.unwrap_or_default());
-            let tags_json_value = serde_json::to_string(&tags_normalized)
-                .map_err(|e| format!("SYSTEM_ERROR: {e}"))?;
-            let note_value = normalize_note(note.as_deref())?;
-
-            conn.execute(
-                r#"
-INSERT INTO providers(
-  cli_key,
-  name,
-  base_url,
-  base_urls_json,
-  base_url_mode,
-  auth_mode,
-  claude_models_json,
-  supported_models_json,
-  model_mapping_json,
-  api_key_plaintext,
-  sort_order,
-  enabled,
-  priority,
-  cost_multiplier,
-  limit_5h_usd,
-  limit_daily_usd,
-  daily_reset_mode,
-  daily_reset_time,
-  limit_weekly_usd,
-  limit_monthly_usd,
-  limit_total_usd,
-  tags_json,
-  note,
-  source_provider_id,
-  bridge_type,
-  stream_idle_timeout_seconds,
-  created_at,
-  updated_at
-) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, '{}', '{}', ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)
-"#,
-                params![
-                    cli_key,
-                    name,
-                    base_url_primary,
-                    base_urls_json,
-                    base_url_mode.as_str(),
-                    requested_auth_mode.as_str(),
-                    claude_models_json,
-                    api_key,
-                    sort_order,
-                    enabled_to_int(enabled),
-                    priority,
-                    cost_multiplier,
-                    limit_5h_usd,
-                    limit_daily_usd,
-                    daily_reset_mode.as_str(),
-                    daily_reset_time,
-                    limit_weekly_usd,
-                    limit_monthly_usd,
-                    limit_total_usd,
-                    tags_json_value,
-                    note_value,
-                    source_provider_id,
-                    bridge_type,
-                    stream_idle_timeout_seconds,
-                    now,
-                    now
-                ],
-            )
-            .map_err(|e| match e {
-                rusqlite::Error::SqliteFailure(err, _)
-                    if err.code == rusqlite::ErrorCode::ConstraintViolation =>
-                {
-                    crate::shared::error::AppError::new("DB_CONSTRAINT", format!(
-                        "provider already exists for cli_key={cli_key}, name={name}"
-                    ))
-                }
-                other => db_err!("failed to insert provider: {other}"),
-            })?;
-
-            let id = conn.last_insert_rowid();
+            let tx = conn
+                .transaction()
+                .map_err(|e| db_err!("failed to start transaction: {e}"))?;
+            let id = insert_provider(
+                &tx,
+                cli_key,
+                name,
+                &base_urls,
+                base_url_mode,
+                requested_auth_mode,
+                api_key,
+                enabled,
+                cost_multiplier,
+                priority,
+                claude_models,
+                model_policy,
+                limit_5h_usd,
+                limit_daily_usd,
+                daily_reset_mode,
+                daily_reset_time,
+                limit_weekly_usd,
+                limit_monthly_usd,
+                limit_total_usd,
+                tags,
+                note,
+                source_provider_id,
+                bridge_type,
+                stream_idle_timeout_seconds,
+                extension_values.as_deref(),
+            )?;
+            tx.commit().map_err(|e| db_err!("failed to commit: {e}"))?;
             Ok(get_by_id(&conn, id)?)
         }
         Some(id) => {
@@ -941,6 +1278,9 @@ INSERT INTO providers(
                 String,
                 i64,
                 String,
+                Option<String>,
+                String,
+                String,
                 String,
                 String,
                 String,
@@ -950,9 +1290,9 @@ INSERT INTO providers(
             );
             let existing: Option<ExistingProviderRow> = tx
                 .query_row(
-                    "SELECT cli_key, api_key_plaintext, priority, claude_models_json, auth_mode, daily_reset_mode, daily_reset_time, tags_json, note, stream_idle_timeout_seconds FROM providers WHERE id = ?1",
+                    "SELECT cli_key, api_key_plaintext, priority, claude_models_json, model_policy_json, supported_models_json, model_mapping_json, auth_mode, daily_reset_mode, daily_reset_time, tags_json, note, stream_idle_timeout_seconds FROM providers WHERE id = ?1",
                     params![id],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?)),
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?, row.get(11)?, row.get(12)?)),
                 )
                 .optional()
                 .map_err(|e| db_err!("failed to query provider: {e}"))?;
@@ -962,6 +1302,9 @@ INSERT INTO providers(
                 existing_api_key,
                 existing_priority,
                 existing_claude_models_json,
+                existing_model_policy_json,
+                existing_supported_models_json,
+                existing_model_mapping_json,
                 existing_auth_mode_raw,
                 existing_daily_reset_mode_raw,
                 existing_daily_reset_time_raw,
@@ -996,7 +1339,10 @@ INSERT INTO providers(
             };
 
             let next_claude_models = match claude_models {
-                Some(v) if cli_key == "claude" => Some(v.normalized()),
+                Some(v) if cli_key == "claude" => {
+                    validate_claude_models(&v)?;
+                    Some(v.normalized())
+                }
                 _ => None,
             };
 
@@ -1008,6 +1354,10 @@ INSERT INTO providers(
                     .map_err(|e| format!("SYSTEM_ERROR: {e}"))?
             } else {
                 "{}".to_string()
+            };
+            let next_model_policy_json = match model_policy {
+                Some(policy) => Some(policy.normalized()?.to_json()?),
+                None => existing_model_policy_json,
             };
 
             let next_limit_5h_usd = validate_limit_usd("limit_5h_usd", limit_5h_usd)?;
@@ -1056,26 +1406,27 @@ SET
   base_url_mode = ?4,
   auth_mode = ?5,
   claude_models_json = ?6,
-  supported_models_json = '{}',
-  model_mapping_json = '{}',
-  api_key_plaintext = ?7,
-  enabled = ?8,
-  cost_multiplier = ?9,
-  priority = ?10,
-  limit_5h_usd = ?11,
-  limit_daily_usd = ?12,
-  daily_reset_mode = ?13,
-  daily_reset_time = ?14,
-  limit_weekly_usd = ?15,
-  limit_monthly_usd = ?16,
-  limit_total_usd = ?17,
-  tags_json = ?18,
-  note = ?19,
-  source_provider_id = ?20,
-  bridge_type = ?21,
-  stream_idle_timeout_seconds = ?22,
-  updated_at = ?23
-WHERE id = ?24
+  model_policy_json = ?7,
+  supported_models_json = ?8,
+  model_mapping_json = ?9,
+  api_key_plaintext = ?10,
+  enabled = ?11,
+  cost_multiplier = ?12,
+  priority = ?13,
+  limit_5h_usd = ?14,
+  limit_daily_usd = ?15,
+  daily_reset_mode = ?16,
+  daily_reset_time = ?17,
+  limit_weekly_usd = ?18,
+  limit_monthly_usd = ?19,
+  limit_total_usd = ?20,
+  tags_json = ?21,
+  note = ?22,
+  source_provider_id = ?23,
+  bridge_type = ?24,
+  stream_idle_timeout_seconds = ?25,
+  updated_at = ?26
+WHERE id = ?27
 "#,
                 params![
                     name,
@@ -1084,6 +1435,9 @@ WHERE id = ?24
                     base_url_mode.as_str(),
                     next_auth_mode,
                     next_claude_models_json,
+                    next_model_policy_json,
+                    existing_supported_models_json,
+                    existing_model_mapping_json,
                     next_api_key,
                     enabled_to_int(enabled),
                     cost_multiplier,
@@ -1116,11 +1470,166 @@ WHERE id = ?24
                 other => db_err!("failed to update provider: {other}"),
             })?;
 
+            replace_extension_values(&tx, id, extension_values.as_deref())?;
             tx.commit().map_err(|e| db_err!("failed to commit: {e}"))?;
 
             get_by_id(&conn, id)
         }
     }
+}
+
+pub fn duplicate(
+    db: &db::Db,
+    duplicate_from_provider_id: i64,
+    input: ProviderUpsertParams,
+) -> crate::shared::error::AppResult<ProviderSummary> {
+    if duplicate_from_provider_id <= 0 {
+        return Err(
+            format!("SEC_INVALID_INPUT: invalid provider_id={duplicate_from_provider_id}").into(),
+        );
+    }
+
+    if input.provider_id.is_some() {
+        return Err("SEC_INVALID_INPUT: duplicate provider_id must be empty"
+            .to_string()
+            .into());
+    }
+
+    let ProviderUpsertParams {
+        provider_id: _,
+        cli_key,
+        name,
+        base_urls,
+        base_url_mode,
+        auth_mode,
+        api_key,
+        enabled,
+        cost_multiplier,
+        priority,
+        claude_models,
+        model_policy,
+        limit_5h_usd,
+        limit_daily_usd,
+        daily_reset_mode,
+        daily_reset_time,
+        limit_weekly_usd,
+        limit_monthly_usd,
+        limit_total_usd,
+        tags,
+        note,
+        source_provider_id,
+        bridge_type,
+        stream_idle_timeout_seconds,
+        extension_values: _,
+    } = input;
+
+    let cli_key = cli_key.trim();
+    validate_cli_key(cli_key)?;
+
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("SEC_INVALID_INPUT: provider name is required"
+            .to_string()
+            .into());
+    }
+
+    let requested_auth_mode = auth_mode.unwrap_or(ProviderAuthMode::ApiKey);
+    let is_oauth = requested_auth_mode == ProviderAuthMode::Oauth;
+    if let Some(ref bt) = bridge_type {
+        if bt != CX2CC_BRIDGE_TYPE {
+            return Err(format!("SEC_INVALID_INPUT: unsupported bridge_type: {bt}").into());
+        }
+    }
+
+    let is_cx2cc = is_cx2cc_bridge(source_provider_id, bridge_type.as_deref());
+    let bridge_type = if is_cx2cc {
+        Some(CX2CC_BRIDGE_TYPE.to_string())
+    } else {
+        None
+    };
+    validate_source_provider(db, None, source_provider_id)?;
+
+    if is_cx2cc && cli_key != "claude" {
+        return Err(
+            "SEC_INVALID_INPUT: cx2cc bridge is only supported for claude"
+                .to_string()
+                .into(),
+        );
+    }
+
+    let base_urls = if is_oauth || is_cx2cc {
+        Vec::new()
+    } else {
+        normalize_base_urls(base_urls)?
+    };
+    let stream_idle_timeout_seconds =
+        normalize_stream_idle_timeout_seconds(stream_idle_timeout_seconds)?;
+    let api_key = api_key.as_deref().map(str::trim).filter(|v| !v.is_empty());
+
+    if !cost_multiplier.is_finite() || !(0.0..=1000.0).contains(&cost_multiplier) {
+        return Err(
+            "SEC_INVALID_INPUT: cost_multiplier must be within [0, 1000]"
+                .to_string()
+                .into(),
+        );
+    }
+
+    if let Some(priority) = priority {
+        if !(0..=1000).contains(&priority) {
+            return Err("SEC_INVALID_INPUT: priority must be within [0, 1000]"
+                .to_string()
+                .into());
+        }
+    }
+
+    let mut conn = db.open_connection()?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| db_err!("failed to start transaction: {e}"))?;
+    let source_exists = tx
+        .query_row(
+            "SELECT 1 FROM providers WHERE id = ?1",
+            params![duplicate_from_provider_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .optional()
+        .map_err(|e| db_err!("failed to query source provider: {e}"))?
+        .is_some();
+    if !source_exists {
+        return Err("DB_NOT_FOUND: provider not found".to_string().into());
+    }
+
+    let id = insert_provider(
+        &tx,
+        cli_key,
+        name,
+        &base_urls,
+        base_url_mode,
+        requested_auth_mode,
+        api_key,
+        enabled,
+        cost_multiplier,
+        priority,
+        claude_models,
+        model_policy,
+        limit_5h_usd,
+        limit_daily_usd,
+        daily_reset_mode,
+        daily_reset_time,
+        limit_weekly_usd,
+        limit_monthly_usd,
+        limit_total_usd,
+        tags,
+        note,
+        source_provider_id,
+        bridge_type,
+        stream_idle_timeout_seconds,
+        None,
+    )?;
+    copy_extension_values(&tx, duplicate_from_provider_id, id)?;
+    tx.commit().map_err(|e| db_err!("failed to commit: {e}"))?;
+
+    get_by_id(&conn, id)
 }
 
 pub fn set_enabled(
@@ -1144,15 +1653,32 @@ pub fn set_enabled(
     get_by_id(&conn, provider_id)
 }
 
-pub fn delete(db: &db::Db, provider_id: i64) -> crate::shared::error::AppResult<()> {
-    let conn = db.open_connection()?;
-    let changed = conn
+pub fn delete(
+    db: &db::Db,
+    provider_id: i64,
+    clear_usage_stats: bool,
+) -> crate::shared::error::AppResult<()> {
+    let mut conn = db.open_connection()?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| db_err!("failed to start transaction: {e}"))?;
+    let changed = tx
         .execute("DELETE FROM providers WHERE id = ?1", params![provider_id])
         .map_err(|e| db_err!("failed to delete provider: {e}"))?;
 
     if changed == 0 {
         return Err("DB_NOT_FOUND: provider not found".to_string().into());
     }
+
+    if clear_usage_stats {
+        tx.execute(
+            "DELETE FROM request_logs WHERE final_provider_id = ?1",
+            params![provider_id],
+        )
+        .map_err(|e| db_err!("failed to delete provider request logs: {e}"))?;
+    }
+
+    tx.commit().map_err(|e| db_err!("failed to commit: {e}"))?;
 
     Ok(())
 }
@@ -1162,8 +1688,48 @@ pub fn reorder(
     cli_key: &str,
     ordered_provider_ids: Vec<i64>,
 ) -> crate::shared::error::AppResult<Vec<ProviderSummary>> {
-    validate_cli_key(cli_key)?;
+    pool_order_set(db, cli_key, ordered_provider_ids)
+}
 
+fn existing_provider_ids_for_cli(
+    tx: &rusqlite::Transaction<'_>,
+    cli_key: &str,
+) -> crate::shared::error::AppResult<Vec<i64>> {
+    let mut existing_ids = Vec::new();
+    let mut stmt = tx
+        .prepare_cached(
+            r#"
+SELECT
+  id
+FROM providers
+WHERE cli_key = ?1
+ORDER BY
+  COALESCE(
+    (SELECT po.sort_order
+     FROM provider_pool_order po
+     WHERE po.cli_key = providers.cli_key
+       AND po.provider_id = providers.id),
+    9223372036854775807
+  ) ASC,
+  sort_order ASC,
+  id DESC
+"#,
+        )
+        .map_err(|e| db_err!("failed to prepare existing id list: {e}"))?;
+    let rows = stmt
+        .query_map(params![cli_key], |row| row.get::<_, i64>(0))
+        .map_err(|e| db_err!("failed to query existing id list: {e}"))?;
+    for row in rows {
+        existing_ids.push(row.map_err(|e| db_err!("failed to read existing id: {e}"))?);
+    }
+    Ok(existing_ids)
+}
+
+fn validate_ordered_provider_ids(
+    cli_key: &str,
+    ordered_provider_ids: &[i64],
+    existing_ids: &[i64],
+) -> crate::shared::error::AppResult<HashSet<i64>> {
     if ordered_provider_ids.len() > MAX_PROVIDER_ORDER_IDS {
         return Err(format!(
             "SEC_INVALID_INPUT: ordered_provider_ids must contain at most {MAX_PROVIDER_ORDER_IDS} entries"
@@ -1172,7 +1738,7 @@ pub fn reorder(
     }
 
     let mut seen = HashSet::new();
-    for id in &ordered_provider_ids {
+    for id in ordered_provider_ids {
         if *id <= 0 {
             return Err(format!("SEC_INVALID_INPUT: invalid provider_id={id}").into());
         }
@@ -1181,28 +1747,8 @@ pub fn reorder(
         }
     }
 
-    let mut conn = db.open_connection()?;
-    let tx = conn
-        .transaction()
-        .map_err(|e| db_err!("failed to start transaction: {e}"))?;
-
-    let mut existing_ids = Vec::new();
-    {
-        let mut stmt = tx
-            .prepare_cached(
-                "SELECT id FROM providers WHERE cli_key = ?1 ORDER BY sort_order ASC, id DESC",
-            )
-            .map_err(|e| db_err!("failed to prepare existing id list: {e}"))?;
-        let rows = stmt
-            .query_map(params![cli_key], |row| row.get::<_, i64>(0))
-            .map_err(|e| db_err!("failed to query existing id list: {e}"))?;
-        for row in rows {
-            existing_ids.push(row.map_err(|e| db_err!("failed to read existing id: {e}"))?);
-        }
-    }
-
     let existing_set: HashSet<i64> = existing_ids.iter().copied().collect();
-    for id in &ordered_provider_ids {
+    for id in ordered_provider_ids {
         if !existing_set.contains(id) {
             return Err(format!(
                 "SEC_INVALID_INPUT: provider_id does not belong to cli_key={cli_key}: {id}"
@@ -1210,6 +1756,24 @@ pub fn reorder(
             .into());
         }
     }
+
+    Ok(seen)
+}
+
+pub fn pool_order_set(
+    db: &db::Db,
+    cli_key: &str,
+    ordered_provider_ids: Vec<i64>,
+) -> crate::shared::error::AppResult<Vec<ProviderSummary>> {
+    validate_cli_key(cli_key)?;
+
+    let mut conn = db.open_connection()?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| db_err!("failed to start transaction: {e}"))?;
+
+    let existing_ids = existing_provider_ids_for_cli(&tx, cli_key)?;
+    let seen = validate_ordered_provider_ids(cli_key, &ordered_provider_ids, &existing_ids)?;
 
     let mut final_ids = Vec::with_capacity(existing_ids.len());
     final_ids.extend(ordered_provider_ids);
@@ -1220,19 +1784,109 @@ pub fn reorder(
     }
 
     let now = now_unix_seconds();
+    tx.execute(
+        "DELETE FROM provider_pool_order WHERE cli_key = ?1",
+        params![cli_key],
+    )
+    .map_err(|e| db_err!("failed to clear provider_pool_order: {e}"))?;
     for (idx, id) in final_ids.iter().enumerate() {
         let sort_order = idx as i64;
         tx.execute(
-            "UPDATE providers SET sort_order = ?1, updated_at = ?2 WHERE id = ?3",
-            params![sort_order, now, id],
+            r#"
+INSERT INTO provider_pool_order(
+  cli_key,
+  provider_id,
+  sort_order,
+  created_at,
+  updated_at
+) VALUES (?1, ?2, ?3, ?4, ?5)
+"#,
+            params![cli_key, id, sort_order, now, now],
         )
-        .map_err(|e| db_err!("failed to update sort_order for provider {id}: {e}"))?;
+        .map_err(|e| db_err!("failed to insert provider_pool_order for provider {id}: {e}"))?;
     }
 
     tx.commit()
         .map_err(|e| db_err!("failed to commit transaction: {e}"))?;
+    drop(conn);
 
     list_by_cli(db, cli_key)
+}
+
+pub fn default_route_list(
+    db: &db::Db,
+    cli_key: &str,
+) -> crate::shared::error::AppResult<Vec<ProviderRouteRow>> {
+    validate_cli_key(cli_key)?;
+    let conn = db.open_connection()?;
+    let mut stmt = conn
+        .prepare_cached(
+            r#"
+SELECT
+  provider_id
+FROM default_route_providers
+WHERE cli_key = ?1
+ORDER BY sort_order ASC
+"#,
+        )
+        .map_err(|e| db_err!("failed to prepare default_route_providers query: {e}"))?;
+    let rows = stmt
+        .query_map(params![cli_key], |row| {
+            Ok(ProviderRouteRow {
+                provider_id: row.get(0)?,
+            })
+        })
+        .map_err(|e| db_err!("failed to query default_route_providers: {e}"))?;
+
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row.map_err(|e| db_err!("failed to read default_route_provider row: {e}"))?);
+    }
+    Ok(items)
+}
+
+pub fn default_route_set_order(
+    db: &db::Db,
+    cli_key: &str,
+    ordered_provider_ids: Vec<i64>,
+) -> crate::shared::error::AppResult<Vec<ProviderRouteRow>> {
+    validate_cli_key(cli_key)?;
+    let mut conn = db.open_connection()?;
+    let tx = conn
+        .transaction()
+        .map_err(|e| db_err!("failed to start transaction: {e}"))?;
+
+    let existing_ids = existing_provider_ids_for_cli(&tx, cli_key)?;
+    validate_ordered_provider_ids(cli_key, &ordered_provider_ids, &existing_ids)?;
+
+    let now = now_unix_seconds();
+    tx.execute(
+        "DELETE FROM default_route_providers WHERE cli_key = ?1",
+        params![cli_key],
+    )
+    .map_err(|e| db_err!("failed to clear default_route_providers: {e}"))?;
+
+    for (idx, id) in ordered_provider_ids.iter().enumerate() {
+        tx.execute(
+            r#"
+INSERT INTO default_route_providers(
+  cli_key,
+  provider_id,
+  sort_order,
+  created_at,
+  updated_at
+) VALUES (?1, ?2, ?3, ?4, ?5)
+"#,
+            params![cli_key, id, idx as i64, now, now],
+        )
+        .map_err(|e| db_err!("failed to insert default_route_provider for provider {id}: {e}"))?;
+    }
+
+    tx.commit()
+        .map_err(|e| db_err!("failed to commit transaction: {e}"))?;
+    drop(conn);
+
+    default_route_list(db, cli_key)
 }
 
 #[allow(clippy::too_many_arguments)]

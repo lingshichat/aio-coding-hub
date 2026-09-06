@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useReducer } from "react";
 import { toast } from "sonner";
 import type { AppSettings, GatewayListenMode } from "../../services/settings/settings";
 import { logToConsole } from "../../services/consoleLog";
@@ -25,6 +25,38 @@ export type NetworkSettingsCardProps = {
   ) => Promise<AppSettings | null>;
 };
 
+type NetworkDraftState = {
+  sourceKey: string;
+  listenMode: GatewayListenMode;
+  customAddress: string;
+};
+
+type NetworkDraftAction =
+  | { type: "resetFromSettings"; state: NetworkDraftState }
+  | { type: "setListenMode"; listenMode: GatewayListenMode }
+  | { type: "setCustomAddress"; customAddress: string };
+
+function createNetworkDraftState(settings: AppSettings): NetworkDraftState {
+  return {
+    sourceKey: `${settings.gateway_listen_mode}:${settings.gateway_custom_listen_address}`,
+    listenMode: settings.gateway_listen_mode,
+    customAddress: settings.gateway_custom_listen_address,
+  };
+}
+
+function networkDraftReducer(
+  state: NetworkDraftState,
+  action: NetworkDraftAction
+): NetworkDraftState {
+  if (action.type === "resetFromSettings") {
+    return action.state;
+  }
+  if (action.type === "setListenMode") {
+    return { ...state, listenMode: action.listenMode };
+  }
+  return { ...state, customAddress: action.customAddress };
+}
+
 export function NetworkSettingsCard({
   available,
   saving,
@@ -34,22 +66,26 @@ export function NetworkSettingsCard({
   const gatewayMeta = useGatewayMeta();
   const gateway = gatewayMeta.gateway;
 
-  const [listenMode, setListenMode] = useState<GatewayListenMode>(settings.gateway_listen_mode);
-  const [customAddress, setCustomAddress] = useState<string>(
-    settings.gateway_custom_listen_address
-  );
+  const nextDraftState = createNetworkDraftState(settings);
+  const [draftState, dispatchDraft] = useReducer(networkDraftReducer, nextDraftState);
+  const effectiveDraftState =
+    draftState.sourceKey === nextDraftState.sourceKey ? draftState : nextDraftState;
+  if (draftState.sourceKey !== nextDraftState.sourceKey) {
+    dispatchDraft({ type: "resetFromSettings", state: nextDraftState });
+  }
+  const { listenMode, customAddress } = effectiveDraftState;
   const wslHostQuery = useWslHostAddressQuery({
     enabled: available && listenMode === "wsl_auto",
   });
   const wslHost = wslHostQuery.data ?? null;
 
-  useEffect(() => {
-    setListenMode(settings.gateway_listen_mode);
-  }, [settings.gateway_listen_mode]);
+  function setListenMode(listenMode: GatewayListenMode) {
+    dispatchDraft({ type: "setListenMode", listenMode });
+  }
 
-  useEffect(() => {
-    setCustomAddress(settings.gateway_custom_listen_address);
-  }, [settings.gateway_custom_listen_address]);
+  function setCustomAddress(customAddress: string) {
+    dispatchDraft({ type: "setCustomAddress", customAddress });
+  }
 
   const currentListenAddress = useMemo(() => {
     if (gateway?.running && gateway.listen_addr) return gateway.listen_addr;
@@ -128,15 +164,15 @@ export function NetworkSettingsCard({
       </div>
 
       <div className="relative z-10">
-        <div className="mb-4 border-b border-slate-100 dark:border-slate-700 pb-4">
-          <h2 className="text-lg font-semibold text-slate-900 dark:text-slate-100 flex items-center gap-2">
+        <div className="mb-4 border-b border-border pb-4">
+          <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
             <Network className="h-5 w-5 text-blue-500" />
             网络设置
           </h2>
         </div>
 
         {!available ? (
-          <div className="text-sm font-medium text-slate-700 dark:text-slate-200 bg-slate-50 dark:bg-slate-800 p-4 rounded-lg">
+          <div className="text-sm font-medium text-secondary-foreground dark:text-foreground bg-secondary p-4 rounded-lg">
             数据不可用
           </div>
         ) : (
@@ -171,7 +207,7 @@ export function NetworkSettingsCard({
             <SettingsRow label="当前监听地址">
               <div
                 className={cn(
-                  "font-mono text-xs text-slate-700 dark:text-slate-300 bg-slate-50 dark:bg-slate-800 px-3 py-2 rounded border border-slate-100 dark:border-slate-700 break-all",
+                  "font-mono text-xs text-secondary-foreground bg-secondary px-3 py-2 rounded border border-border break-all",
                   !gateway?.running ? "opacity-80" : null
                 )}
               >

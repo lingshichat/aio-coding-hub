@@ -12,6 +12,8 @@ import { Cx2ccSection } from "./Cx2ccSection";
 import { ApiKeySection } from "./ApiKeySection";
 import { LimitsSection } from "./LimitsSection";
 import { ClaudeModelSection } from "./ClaudeModelSection";
+import { ProviderModelPolicySection } from "./ProviderModelPolicySection";
+import { ContributionSlot } from "../../plugins/contributions/ContributionSlot";
 
 type ProviderEditorDialogBaseProps = {
   open: boolean;
@@ -88,6 +90,13 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
           <ApiKeySection form={f} />
         )}
 
+        <ContributionSlot
+          slotId="providers.editor.sections"
+          valuesByContributionKey={f.extensionValuesByContributionKey}
+          onChange={(contribution, key, value) => f.setExtensionValue(contribution, key, value)}
+          disabled={f.saving}
+        />
+
         <FormField
           label="流式空闲超时覆盖（秒）"
           hint="留空或 0 表示沿用全局设置；仅对当前 Provider 的流式请求生效。"
@@ -104,12 +113,24 @@ export function ProviderEditorDialog(props: ProviderEditorDialogProps) {
           />
         </FormField>
 
+        <ProviderModelPolicySection
+          cliKey={f.cliKey}
+          status={f.modelPolicyStatus}
+          policy={f.modelPolicy}
+          legacyClaudeModels={f.claudeModels}
+          saving={f.saving}
+          onChange={f.setModelPolicy}
+          modelDiscoveryState={f.modelDiscoveryState}
+          onDiscoverModels={f.discoverModels}
+          hasMultipleBaseUrls={f.baseUrlRows.filter((row) => row.url.trim()).length > 1}
+          showMappings={!(f.cliKey === "claude" && f.authMode === "cx2cc")}
+        />
         <LimitsSection form={f} />
-        <ClaudeModelSection form={f} />
+        {f.cliKey === "claude" && f.authMode === "cx2cc" ? <ClaudeModelSection form={f} /> : null}
 
-        <div className="flex items-center justify-between border-t border-slate-100 pt-3 dark:border-slate-700">
+        <div className="flex items-center justify-between border-t border-border pt-3 dark:border-border">
           <div className="flex items-center gap-2">
-            <span className="text-sm text-slate-700 dark:text-slate-300">启用</span>
+            <span className="text-sm text-secondary-foreground">启用</span>
             <Switch
               checked={f.enabled}
               onCheckedChange={(checked) => f.setValue("enabled", checked, { shouldDirty: true })}

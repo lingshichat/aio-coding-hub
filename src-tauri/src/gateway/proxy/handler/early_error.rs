@@ -4,6 +4,7 @@
 //! the request reaches the failover/forwarder stage.
 
 use super::SpecialSettings;
+use crate::gateway::proxy::errors;
 use crate::gateway::proxy::errors::error_response;
 use crate::gateway::proxy::request_end::{
     emit_request_event_and_enqueue_request_log, emit_request_event_and_spawn_request_log,
@@ -26,6 +27,12 @@ pub(super) enum EarlyErrorKind {
     LargeBodyMissingModel,
     InvalidCliKey,
     NoEnabledProvider,
+    ForcedProviderNotEligibleForModel,
+    NoEligibleProviderForModel,
+    ModelPolicyInvalid,
+    // Provider selection failed for infrastructure reasons (DB / blocking
+    // pool), not because of anything the client sent.
+    ProviderSelectionFailed,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -66,6 +73,33 @@ pub(super) fn early_error_contract(kind: EarlyErrorKind) -> EarlyErrorContract {
             status: StatusCode::SERVICE_UNAVAILABLE,
             error_code: GatewayErrorCode::NoEnabledProvider.as_str(),
             error_category: None,
+            excluded_from_stats: false,
+        },
+        EarlyErrorKind::ForcedProviderNotEligibleForModel => EarlyErrorContract {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            error_code: GatewayErrorCode::ForcedProviderNotEligibleForModel.as_str(),
+            error_category: None,
+            excluded_from_stats: false,
+        },
+        EarlyErrorKind::NoEligibleProviderForModel => EarlyErrorContract {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            error_code: GatewayErrorCode::NoEligibleProviderForModel.as_str(),
+            error_category: None,
+            excluded_from_stats: false,
+        },
+        EarlyErrorKind::ModelPolicyInvalid => EarlyErrorContract {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            error_code: GatewayErrorCode::ModelPolicyInvalid.as_str(),
+            error_category: None,
+            excluded_from_stats: false,
+        },
+        // 500 (matches status_override_for_error_code's mapping for
+        // GW_INTERNAL_ERROR) rather than the 400/invalid-cli-key class these
+        // errors used to be misfiled under.
+        EarlyErrorKind::ProviderSelectionFailed => EarlyErrorContract {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            error_code: GatewayErrorCode::InternalError.as_str(),
+            error_category: Some(ErrorCategory::SystemError.as_str()),
             excluded_from_stats: false,
         },
     }
@@ -171,6 +205,21 @@ fn build_early_error_response(
     )
 }
 
+async fn build_early_error_response_with_plugins<R: tauri::Runtime>(
+    ctx: &EarlyErrorLogCtx<'_, R>,
+    contract: EarlyErrorContract,
+    message: String,
+) -> Response {
+    let resp = build_early_error_response(ctx.trace_id, contract, message);
+    errors::apply_gateway_error_hook(
+        &ctx.state.db,
+        ctx.state.plugin_pipeline.clone(),
+        ctx.trace_id.to_string(),
+        resp,
+    )
+    .await
+}
+
 fn early_error_request_end_args<'a, R: tauri::Runtime>(
     ctx: &'a EarlyErrorLogCtx<'a, R>,
     contract: EarlyErrorContract,
@@ -179,7 +228,13 @@ fn early_error_request_end_args<'a, R: tauri::Runtime>(
     requested_model: Option<String>,
 ) -> RequestEndArgs<'a, R> {
     RequestEndArgs::from_context(RequestEndContextArgs {
-        deps: RequestEndDeps::new(&ctx.state.app, &ctx.state.db, &ctx.state.log_tx),
+        deps: RequestEndDeps::new(
+            &ctx.state.app,
+            &ctx.state.db,
+            &ctx.state.log_tx,
+            &ctx.state.plugin_pipeline,
+            &ctx.state.active_requests,
+        ),
         trace_id: ctx.trace_id,
         cli_key: ctx.cli_key,
         method: ctx.method_hint,
@@ -210,7 +265,7 @@ pub(super) async fn respond_early_error_with_enqueue<R: tauri::Runtime>(
     session_id: Option<String>,
     requested_model: Option<String>,
 ) -> Response {
-    let resp = build_early_error_response(ctx.trace_id, contract, message);
+    let resp = build_early_error_response_with_plugins(ctx, contract, message).await;
     emit_request_event_and_enqueue_request_log(early_error_request_end_args(
         ctx,
         contract,
@@ -243,10 +298,36 @@ pub(super) fn respond_early_error_with_spawn<R: tauri::Runtime>(
 
 pub(super) fn respond_invalid_cli_key_with_spawn<R: tauri::Runtime>(
     ctx: &EarlyErrorLogCtx<'_, R>,
+    special_settings_json: Option<String>,
     session_id: Option<String>,
     requested_model: Option<String>,
     err: String,
 ) -> Response {
     let contract = early_error_contract(EarlyErrorKind::InvalidCliKey);
-    respond_early_error_with_spawn(ctx, contract, err, None, session_id, requested_model)
+    respond_early_error_with_spawn(
+        ctx,
+        contract,
+        err,
+        special_settings_json,
+        session_id,
+        requested_model,
+    )
+}
+
+pub(super) fn respond_provider_selection_failed_with_spawn<R: tauri::Runtime>(
+    ctx: &EarlyErrorLogCtx<'_, R>,
+    special_settings_json: Option<String>,
+    session_id: Option<String>,
+    requested_model: Option<String>,
+    err: String,
+) -> Response {
+    let contract = early_error_contract(EarlyErrorKind::ProviderSelectionFailed);
+    respond_early_error_with_spawn(
+        ctx,
+        contract,
+        err,
+        special_settings_json,
+        session_id,
+        requested_model,
+    )
 }

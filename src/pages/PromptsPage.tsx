@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { CLIS, cliLongLabel } from "../constants/clis";
+import { cliKeysWith, cliLongLabel } from "../constants/clis";
 import { logToConsole } from "../services/consoleLog";
 import { getOrderedClis, pickDefaultCliByPriority } from "../services/cli/cliPriorityOrder";
 import type { CliKey } from "../services/providers/providers";
@@ -17,10 +17,12 @@ import { useWorkspacesListQuery } from "../query/workspaces";
 export function PromptsPage() {
   const navigate = useNavigate();
   const settingsQuery = useSettingsQuery();
-  const orderedCliTabs = getOrderedClis(settingsQuery.data?.cli_priority_order);
+  const promptCliKeys = cliKeysWith("prompts");
+  const orderedCliTabs = getOrderedClis(settingsQuery.data?.cli_priority_order, promptCliKeys);
   const orderedCliKeys = orderedCliTabs.map((cli) => cli.key);
   const defaultCli =
-    pickDefaultCliByPriority(settingsQuery.data?.cli_priority_order, orderedCliKeys) ?? CLIS[0].key;
+    pickDefaultCliByPriority(settingsQuery.data?.cli_priority_order, orderedCliKeys) ??
+    promptCliKeys[0];
   const [activeCli, setActiveCli] = useState<CliKey | null>(null);
   const effectiveCli = activeCli ?? defaultCli;
 
@@ -53,7 +55,7 @@ export function PromptsPage() {
         }
       />
 
-      <div className="shrink-0 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-300">
+      <div className="shrink-0 rounded-xl border border-border bg-secondary px-3 py-2 text-sm text-secondary-foreground">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>这是高级入口：默认操作当前 workspace。推荐在「Workspaces」配置中心统一管理。</div>
           <Button variant="secondary" onClick={() => navigate("/workspaces")}>
@@ -64,9 +66,9 @@ export function PromptsPage() {
 
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-overlay">
         {loading ? (
-          <div className="text-sm text-slate-600 dark:text-slate-400">加载中…</div>
+          <div className="text-sm text-muted-foreground">加载中…</div>
         ) : !activeWorkspaceId ? (
-          <div className="text-sm text-slate-600 dark:text-slate-400">
+          <div className="text-sm text-muted-foreground">
             未找到 {cliLabel} 的当前工作区（workspace）。请先在 Workspaces 页面创建并设为当前。
           </div>
         ) : (

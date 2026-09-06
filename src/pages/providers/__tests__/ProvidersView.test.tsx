@@ -22,21 +22,36 @@ import {
   useGatewayCircuitResetCliMutation,
   useGatewayCircuitResetProviderMutation,
   useGatewayCircuitStatusQuery,
+  useGatewaySessionsListQuery,
 } from "../../../query/gateway";
 import {
+  useDefaultRouteProvidersQuery,
+  useDefaultRouteProvidersSetOrderMutation,
   useProviderClaudeTerminalLaunchCommandMutation,
   useProviderDeleteMutation,
   useProviderSetEnabledMutation,
+  useProviderTestAvailabilityMutation,
   useProvidersListQuery,
   useProvidersReorderMutation,
 } from "../../../query/providers";
+import {
+  useSortModeActiveListQuery,
+  useSortModeActiveSetMutation,
+  useSortModeCreateMutation,
+  useSortModeDeleteMutation,
+  useSortModeProviderSetEnabledMutation,
+  useSortModeProvidersListQuery,
+  useSortModeProvidersSetOrderMutation,
+  useSortModeRenameMutation,
+  useSortModesListQuery,
+} from "../../../query/sortModes";
 
-let latestOnDragEnd: ((event: any) => void) | null = null;
+let dndContextDragHandlers: Array<((event: any) => void) | null> = [];
 let sortableIsDragging = false;
 
 vi.mock("@dnd-kit/core", () => ({
   DndContext: ({ children, onDragEnd }: any) => {
-    latestOnDragEnd = onDragEnd ?? null;
+    dndContextDragHandlers.push(onDragEnd ?? null);
     return <div data-testid="dnd">{children}</div>;
   },
   PointerSensor: function PointerSensor() {},
@@ -81,18 +96,6 @@ vi.mock("../../../services/providers/providers", async () => {
   };
 });
 
-vi.mock("../../../components/ClaudeModelValidationDialog", () => ({
-  ClaudeModelValidationDialog: ({ open, onOpenChange }: any) =>
-    open ? (
-      <div>
-        validate
-        <button type="button" onClick={() => onOpenChange?.(false)}>
-          close-validate
-        </button>
-      </div>
-    ) : null,
-}));
-
 vi.mock("../ProviderEditorDialog", () => ({
   ProviderEditorDialog: ({ mode, cliKey, provider, initialValues, onSaved, onOpenChange }: any) => (
     <div
@@ -120,6 +123,7 @@ vi.mock("../../../query/gateway", async () => {
     useGatewayCircuitStatusQuery: vi.fn(),
     useGatewayCircuitResetProviderMutation: vi.fn(),
     useGatewayCircuitResetCliMutation: vi.fn(),
+    useGatewaySessionsListQuery: vi.fn(),
   };
 });
 
@@ -130,10 +134,31 @@ vi.mock("../../../query/providers", async () => {
   return {
     ...actual,
     useProvidersListQuery: vi.fn(),
+    useDefaultRouteProvidersQuery: vi.fn(),
+    useDefaultRouteProvidersSetOrderMutation: vi.fn(),
     useProviderClaudeTerminalLaunchCommandMutation: vi.fn(),
     useProviderSetEnabledMutation: vi.fn(),
     useProviderDeleteMutation: vi.fn(),
     useProvidersReorderMutation: vi.fn(),
+    useProviderTestAvailabilityMutation: vi.fn(),
+  };
+});
+
+vi.mock("../../../query/sortModes", async () => {
+  const actual = await vi.importActual<typeof import("../../../query/sortModes")>(
+    "../../../query/sortModes"
+  );
+  return {
+    ...actual,
+    useSortModesListQuery: vi.fn(),
+    useSortModeActiveListQuery: vi.fn(),
+    useSortModeProvidersListQuery: vi.fn(),
+    useSortModeCreateMutation: vi.fn(),
+    useSortModeRenameMutation: vi.fn(),
+    useSortModeDeleteMutation: vi.fn(),
+    useSortModeActiveSetMutation: vi.fn(),
+    useSortModeProvidersSetOrderMutation: vi.fn(),
+    useSortModeProviderSetEnabledMutation: vi.fn(),
   };
 });
 
@@ -149,7 +174,16 @@ function queryWrapper() {
   };
 }
 
+function dragProviderPool(event: any) {
+  dndContextDragHandlers[0]?.(event);
+}
+
+// jsdom 未实现 scrollIntoView：集中打桩一次，由 afterEach 清计数，避免跨用例累积调用记录。
+const scrollIntoViewMock = vi.fn();
+Element.prototype.scrollIntoView = scrollIntoViewMock;
+
 beforeEach(() => {
+  dndContextDragHandlers = [];
   vi.mocked(copyText).mockResolvedValue(undefined);
   vi.mocked(providerDuplicate).mockResolvedValue({
     id: 999,
@@ -159,15 +193,156 @@ beforeEach(() => {
   vi.mocked(useProviderClaudeTerminalLaunchCommandMutation).mockReturnValue({
     mutateAsync: vi.fn().mockResolvedValue("bash '/tmp/aio.sh'"),
   } as any);
+  vi.mocked(useProviderTestAvailabilityMutation).mockReturnValue({
+    mutateAsync: vi.fn().mockResolvedValue({ ok: true, latency_ms: 100, status: 200, error: null }),
+  } as any);
+  vi.mocked(useGatewaySessionsListQuery).mockReturnValue({
+    data: [],
+    isFetching: false,
+  } as any);
+  vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+    data: [],
+    isFetching: false,
+  } as any);
+  vi.mocked(useDefaultRouteProvidersSetOrderMutation).mockReturnValue({
+    mutateAsync: vi.fn().mockResolvedValue([]),
+  } as any);
+  vi.mocked(useSortModesListQuery).mockReturnValue({
+    data: [],
+    isLoading: false,
+  } as any);
+  vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+    data: [],
+    isLoading: false,
+  } as any);
+  vi.mocked(useSortModeProvidersListQuery).mockReturnValue({
+    data: null,
+    isFetching: false,
+  } as any);
+  vi.mocked(useSortModeCreateMutation).mockReturnValue({
+    mutateAsync: vi
+      .fn()
+      .mockResolvedValue({ id: 10, name: "新模板", created_at: 1, updated_at: 1 }),
+  } as any);
+  vi.mocked(useSortModeRenameMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+  vi.mocked(useSortModeDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+  vi.mocked(useSortModeActiveSetMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+  vi.mocked(useSortModeProvidersSetOrderMutation).mockReturnValue({
+    mutateAsync: vi.fn().mockResolvedValue([]),
+  } as any);
+  vi.mocked(useSortModeProviderSetEnabledMutation).mockReturnValue({
+    mutateAsync: vi.fn(),
+  } as any);
 });
 
 afterEach(() => {
   cleanup();
   vi.useRealTimers();
   sortableIsDragging = false;
+  scrollIntoViewMock.mockClear();
 });
 
 describe("pages/providers/ProvidersView", () => {
+  it("shows the active sort mode when entering the providers page", async () => {
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: [
+        {
+          id: 1,
+          cli_key: "claude",
+          name: "P1",
+          enabled: true,
+          base_urls: ["https://a"],
+          base_url_mode: "order",
+          cost_multiplier: 1,
+          claude_models: {},
+        },
+      ],
+      isFetching: false,
+    } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useSortModesListQuery).mockReturnValue({
+      data: [{ id: 10, name: "Review", created_at: 1, updated_at: 1 }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+      data: [{ cli_key: "claude", mode_id: 10 }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useSortModeProvidersListQuery).mockReturnValue({
+      data: [{ provider_id: 1, enabled: true }],
+      isFetching: false,
+    } as any);
+
+    renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
+
+    await waitFor(() =>
+      expect(screen.getByRole("combobox", { name: "选择调用顺序" })).toHaveValue("mode:10")
+    );
+    expect(screen.getByText("Review 按照从上到下依次调用")).toBeInTheDocument();
+    expect(useSortModeProvidersListQuery).toHaveBeenLastCalledWith(
+      { modeId: 10, cliKey: "claude" },
+      { enabled: true }
+    );
+  });
+
+  it("does not overwrite a manually selected order when active-mode data refreshes", async () => {
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useSortModesListQuery).mockReturnValue({
+      data: [
+        { id: 10, name: "Review", created_at: 1, updated_at: 1 },
+        { id: 20, name: "Work", created_at: 1, updated_at: 1 },
+      ],
+      isLoading: false,
+    } as any);
+    vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+      data: [{ cli_key: "claude", mode_id: 10 }],
+      isLoading: false,
+    } as any);
+
+    const { result, rerender } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    await waitFor(() =>
+      expect(result.current.routeDraftSelection).toEqual({ kind: "mode", modeId: 10 })
+    );
+
+    act(() => result.current.selectRouteDraft("mode:20"));
+    expect(result.current.routeDraftSelection).toEqual({ kind: "mode", modeId: 20 });
+
+    vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+      data: [{ cli_key: "claude", mode_id: 10 }],
+      isLoading: false,
+    } as any);
+    rerender();
+
+    expect(result.current.routeDraftSelection).toEqual({ kind: "mode", modeId: 20 });
+  });
+
   it("treats cooldown-only circuits as unavailable for reset-all visibility", () => {
     vi.useFakeTimers();
     vi.setSystemTime(1_700_000_000_000);
@@ -213,7 +388,9 @@ describe("pages/providers/ProvidersView", () => {
     renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
 
     expect(screen.getByRole("button", { name: "解除熔断（全部）" })).toBeInTheDocument();
-    expect(screen.getByText(/^熔断\s*00:30$/)).toBeInTheDocument();
+    // 冷却正名：卡片显示“冷却中”而非“熔断”。
+    expect(screen.getByText(/^冷却中\s*00:30$/)).toBeInTheDocument();
+    expect(screen.queryByText(/^熔断\s*00:30$/)).not.toBeInTheDocument();
   });
 
   it("does not show reset-all visibility for HALF_OPEN probe state", () => {
@@ -260,8 +437,10 @@ describe("pages/providers/ProvidersView", () => {
 
     renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
 
+    // 仅半开：全局“解除熔断（全部）”不显示，但卡片级徽章与解除按钮可见。
     expect(screen.queryByRole("button", { name: "解除熔断（全部）" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "解除熔断" })).not.toBeInTheDocument();
+    expect(screen.getByText("试探恢复中")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "解除熔断" })).toBeInTheDocument();
   });
 
   it("shows cx2cc source provider name on claude cards", () => {
@@ -378,7 +557,7 @@ describe("pages/providers/ProvidersView", () => {
     } as any);
 
     const toggleMutation = { isPending: false, mutateAsync: vi.fn() };
-    toggleMutation.mutateAsync.mockResolvedValue({ ...providers[1], enabled: true });
+    toggleMutation.mutateAsync.mockResolvedValue({ ...providers[0], enabled: false });
     vi.mocked(useProviderSetEnabledMutation).mockReturnValue(toggleMutation as any);
 
     const deleteMutation = { isPending: false, mutateAsync: vi.fn() };
@@ -388,6 +567,10 @@ describe("pages/providers/ProvidersView", () => {
     const reorderMutation = { isPending: false, mutateAsync: vi.fn() };
     reorderMutation.mutateAsync.mockResolvedValue([providers[2], providers[1], providers[0]]);
     vi.mocked(useProvidersReorderMutation).mockReturnValue(reorderMutation as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }, { provider_id: 3 }],
+      isFetching: false,
+    } as any);
 
     const resetProviderMutation = { isPending: false, mutateAsync: vi.fn(), variables: null };
     resetProviderMutation.mutateAsync.mockResolvedValue(true);
@@ -406,16 +589,16 @@ describe("pages/providers/ProvidersView", () => {
     renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
 
     expect(screen.getByText("调用顺序")).toBeInTheDocument();
-    expect(screen.getByText("调用顺序按照从上到下依次调用")).toBeInTheDocument();
+    expect(screen.getByText("Default 按照从上到下依次调用")).toBeInTheDocument();
     const orderPanel = within(screen.getByRole("complementary", { name: "供应商调用顺序" }));
     expect(orderPanel.getByText("P1")).toBeInTheDocument();
     expect(orderPanel.getByText("P3")).toBeInTheDocument();
     expect(orderPanel.queryByText("P2")).not.toBeInTheDocument();
 
-    // Toggle provider 2 to enabled.
-    fireEvent.click(screen.getAllByRole("switch")[1]!);
+    // Toggle provider 1 from the Default route order switch.
+    fireEvent.click(orderPanel.getByRole("switch", { name: "P1 在调用顺序中启用" }));
     await waitFor(() =>
-      expect(toggleMutation.mutateAsync).toHaveBeenCalledWith({ providerId: 2, enabled: true })
+      expect(toggleMutation.mutateAsync).toHaveBeenCalledWith({ providerId: 1, enabled: false })
     );
 
     // Reset circuit for provider 1 (OPEN).
@@ -455,22 +638,87 @@ describe("pages/providers/ProvidersView", () => {
 
     // Delete provider 1.
     fireEvent.click(screen.getAllByTitle("删除")[0]!);
+    expect(
+      screen.getByRole("checkbox", { name: "同时删除该 Provider 的用量统计和请求日志" })
+    ).not.toBeChecked();
+    expect(
+      screen.getByText("删除后该 Provider 的历史请求日志和用量统计都将移除。")
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
     await waitFor(() =>
-      expect(deleteMutation.mutateAsync).toHaveBeenCalledWith({ cliKey: "claude", providerId: 1 })
+      expect(deleteMutation.mutateAsync).toHaveBeenCalledWith({
+        cliKey: "claude",
+        providerId: 1,
+        clearUsageStats: false,
+      })
     );
 
-    // Drag reorder enabled providers (1 -> 3), preserving hidden disabled provider 2 slot.
-    latestOnDragEnd?.({ active: { id: 1 }, over: { id: 3 } });
+    // Drag reorder resource-pool providers (1 -> 3) across the full provider list.
+    dragProviderPool({ active: { id: 1 }, over: { id: 3 } });
     await waitFor(() =>
       expect(reorderMutation.mutateAsync).toHaveBeenCalledWith({
         cliKey: "claude",
-        orderedProviderIds: [3, 2, 1],
+        orderedProviderIds: [2, 3, 1],
         optimisticProviders: [
-          expect.objectContaining({ id: 3, name: "P3", enabled: true }),
           expect.objectContaining({ id: 2, name: "P2", enabled: false }),
+          expect.objectContaining({ id: 3, name: "P3", enabled: true }),
           expect.objectContaining({ id: 1, name: "P1", enabled: true }),
         ],
+      })
+    );
+  });
+
+  it("passes usage stats cleanup when checked in provider delete dialog", async () => {
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: [
+        {
+          id: 1,
+          cli_key: "claude",
+          name: "P1",
+          enabled: true,
+          base_urls: ["https://a"],
+          base_url_mode: "order",
+          cost_multiplier: 1,
+          claude_models: {},
+        },
+      ],
+      isFetching: false,
+      error: null,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      error: null,
+      refetch: vi.fn().mockResolvedValue({ data: [] }),
+    } as any);
+
+    const deleteMutation = { isPending: false, mutateAsync: vi.fn().mockResolvedValue(true) };
+    vi.mocked(useProviderDeleteMutation).mockReturnValue(deleteMutation as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+      variables: null,
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+      variables: null,
+    } as any);
+
+    renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
+
+    fireEvent.click(screen.getByTitle("删除"));
+    const cleanupCheckbox = screen.getByRole("checkbox", {
+      name: "同时删除该 Provider 的用量统计和请求日志",
+    });
+    fireEvent.click(cleanupCheckbox);
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+
+    await waitFor(() =>
+      expect(deleteMutation.mutateAsync).toHaveBeenCalledWith({
+        cliKey: "claude",
+        providerId: 1,
+        clearUsageStats: true,
       })
     );
   });
@@ -538,8 +786,8 @@ describe("pages/providers/ProvidersView", () => {
 
     renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
 
-    latestOnDragEnd?.({ active: { id: 1 }, over: { id: 2 } });
-    latestOnDragEnd?.({ active: { id: 2 }, over: { id: 3 } });
+    dragProviderPool({ active: { id: 1 }, over: { id: 2 } });
+    dragProviderPool({ active: { id: 2 }, over: { id: 3 } });
 
     expect(reorderMutation.mutateAsync).toHaveBeenCalledTimes(1);
     expect(reorderMutation.mutateAsync).toHaveBeenCalledWith({
@@ -554,6 +802,87 @@ describe("pages/providers/ProvidersView", () => {
 
     resolveReorder([providers[1], providers[0], providers[2]]);
     await reorderPromise;
+  });
+
+  it("reorders visible provider cards including disabled providers", async () => {
+    const providers = [
+      {
+        id: 1,
+        cli_key: "claude",
+        name: "P1",
+        enabled: true,
+        base_urls: ["https://a"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 2,
+        cli_key: "claude",
+        name: "P2",
+        enabled: false,
+        base_urls: ["https://b"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 3,
+        cli_key: "claude",
+        name: "P3",
+        enabled: true,
+        base_urls: ["https://c"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+    ] as any[];
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: providers,
+      isFetching: false,
+      error: null,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      error: null,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    const reorderMutation = {
+      mutateAsync: vi.fn().mockResolvedValue([providers[0], providers[2], providers[1]]),
+    };
+    vi.mocked(useProvidersReorderMutation).mockReturnValue(reorderMutation as any);
+
+    const { result } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    act(() => {
+      result.current.handleProviderCardDragEnd({
+        active: { id: 2, data: { current: undefined }, rect: { current: {} } },
+        over: { id: 3, rect: {}, disabled: false, data: { current: undefined } },
+      } as Parameters<typeof result.current.handleProviderCardDragEnd>[0]);
+    });
+
+    await waitFor(() =>
+      expect(reorderMutation.mutateAsync).toHaveBeenCalledWith({
+        cliKey: "claude",
+        orderedProviderIds: [1, 3, 2],
+        optimisticProviders: [
+          expect.objectContaining({ id: 1, name: "P1", enabled: true }),
+          expect.objectContaining({ id: 3, name: "P3", enabled: true }),
+          expect.objectContaining({ id: 2, name: "P2", enabled: false }),
+        ],
+      })
+    );
   });
 
   it("duplicates a provider directly through backend mutation", async () => {
@@ -880,6 +1209,10 @@ describe("pages/providers/ProvidersView", () => {
     vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
     vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
     vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }, { provider_id: 2 }],
+      isFetching: false,
+    } as any);
     vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
       mutateAsync: vi.fn(),
     } as any);
@@ -888,7 +1221,7 @@ describe("pages/providers/ProvidersView", () => {
     renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
 
     expect(screen.getByText("共 2 / 2 条")).toBeInTheDocument();
-    expect(screen.getByText("调用顺序按照从上到下依次调用")).toBeInTheDocument();
+    expect(screen.getByText("Default 按照从上到下依次调用")).toBeInTheDocument();
 
     const searchInput = screen.getByRole("textbox", { name: "搜索供应商名称" });
     fireEvent.change(searchInput, { target: { value: "beta" } });
@@ -896,8 +1229,8 @@ describe("pages/providers/ProvidersView", () => {
     expect(screen.getAllByText("Beta Gateway").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Alpha Relay")).toHaveLength(1);
     const orderPanel = within(screen.getByRole("complementary", { name: "供应商调用顺序" }));
-    expect(orderPanel.getByLabelText("第 1 位")).toBeInTheDocument();
-    expect(orderPanel.getByLabelText("第 2 位")).toBeInTheDocument();
+    expect(orderPanel.queryByLabelText("第 1 位")).not.toBeInTheDocument();
+    expect(orderPanel.queryByLabelText("第 2 位")).not.toBeInTheDocument();
     expect(screen.getByText("共 1 / 2 条")).toBeInTheDocument();
 
     fireEvent.change(searchInput, { target: { value: "" } });
@@ -905,6 +1238,201 @@ describe("pages/providers/ProvidersView", () => {
     expect(screen.getAllByText("Alpha Relay").length).toBeGreaterThan(0);
     expect(screen.getAllByText("Beta Gateway").length).toBeGreaterThan(0);
     expect(screen.getByText("共 2 / 2 条")).toBeInTheDocument();
+  });
+
+  const LOCATE_PROVIDERS = [
+    {
+      id: 1,
+      cli_key: "claude",
+      name: "Alpha Relay",
+      enabled: true,
+      base_urls: ["https://a"],
+      base_url_mode: "order",
+      cost_multiplier: 1,
+      claude_models: {},
+      tags: ["prod"],
+    },
+    {
+      id: 2,
+      cli_key: "claude",
+      name: "Beta Gateway",
+      enabled: true,
+      base_urls: ["https://b"],
+      base_url_mode: "ping",
+      cost_multiplier: 1,
+      claude_models: {},
+      tags: ["prod"],
+    },
+  ] as any[];
+
+  function renderLocateScenario(
+    routeRows: Array<{ provider_id: number }> = [{ provider_id: 1 }, { provider_id: 2 }]
+  ) {
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: LOCATE_PROVIDERS,
+      isFetching: false,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: routeRows,
+      isFetching: false,
+    } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
+  }
+
+  it("locates a provider card from the route order, clearing filters first", async () => {
+    renderLocateScenario();
+
+    // Filtering hides Alpha Relay from the pool list (only the route sidebar copy remains).
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索供应商名称" }), {
+      target: { value: "beta" },
+    });
+    expect(screen.getByText("共 1 / 2 条")).toBeInTheDocument();
+    expect(screen.getAllByText("Alpha Relay")).toHaveLength(1);
+
+    // Locate from the route order: clears the search filter and scrolls to the card.
+    fireEvent.click(screen.getByRole("button", { name: "定位 Alpha Relay 到供应商卡片" }));
+
+    await waitFor(() => expect(screen.getByText("共 2 / 2 条")).toBeInTheDocument());
+    await waitFor(() => expect(screen.getAllByText("Alpha Relay").length).toBeGreaterThan(1));
+    await waitFor(() =>
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: "smooth", block: "start" })
+    );
+  });
+
+  it("locates a provider card even when no filter is active", async () => {
+    renderLocateScenario();
+
+    // 无过滤时清空过滤不改变过滤结果，定位仍必须滚动：守住「靠 filteredProviders 换引用才生效」的回归。
+    expect(screen.getByText("共 2 / 2 条")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "定位 Alpha Relay 到供应商卡片" }));
+
+    await waitFor(() =>
+      expect(scrollIntoViewMock).toHaveBeenCalledWith({ behavior: "smooth", block: "start" })
+    );
+  });
+
+  it("disables the locate button when the route row provider is missing", () => {
+    renderLocateScenario([{ provider_id: 1 }, { provider_id: 3 }]);
+
+    expect(
+      screen.getByRole("button", { name: "定位 未知 Provider #3 到供应商卡片" })
+    ).toBeDisabled();
+  });
+
+  it("does not scroll again when the list changes after a locate", async () => {
+    renderLocateScenario();
+
+    fireEvent.click(screen.getByRole("button", { name: "定位 Alpha Relay 到供应商卡片" }));
+    await waitFor(() => expect(scrollIntoViewMock).toHaveBeenCalledTimes(1));
+    scrollIntoViewMock.mockClear();
+
+    // 定位意图已被消费：后续过滤变化不得再触发滚动。
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索供应商名称" }), {
+      target: { value: "alpha" },
+    });
+    await waitFor(() => expect(screen.getByText("共 1 / 2 条")).toBeInTheDocument());
+    expect(scrollIntoViewMock).not.toHaveBeenCalled();
+  });
+
+  it("lets sort mode providers be re-enabled from the route order switch", async () => {
+    const providers = [
+      {
+        id: 1,
+        cli_key: "claude",
+        name: "P1",
+        enabled: true,
+        base_urls: ["https://a"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 2,
+        cli_key: "claude",
+        name: "P2",
+        enabled: true,
+        base_urls: ["https://b"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+    ] as any[];
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({ data: providers, isFetching: false } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }, { provider_id: 2 }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useSortModesListQuery).mockReturnValue({
+      data: [{ id: 10, name: "Review Mode", created_at: 1, updated_at: 1 }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useSortModeProvidersListQuery).mockReturnValue({
+      data: [
+        { provider_id: 1, enabled: false },
+        { provider_id: 2, enabled: true },
+      ],
+      isFetching: false,
+    } as any);
+    const setModeProviderEnabled = vi.fn().mockResolvedValue({ provider_id: 1, enabled: true });
+    vi.mocked(useSortModeProviderSetEnabledMutation).mockReturnValue({
+      mutateAsync: setModeProviderEnabled,
+    } as any);
+
+    renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
+
+    fireEvent.change(screen.getByRole("combobox", { name: "选择调用顺序" }), {
+      target: { value: "mode:10" },
+    });
+
+    await waitFor(() =>
+      expect(screen.getByText("Review Mode 按照从上到下依次调用")).toBeInTheDocument()
+    );
+    const orderPanel = within(screen.getByRole("complementary", { name: "供应商调用顺序" }));
+    expect(orderPanel.queryByLabelText("第 1 位")).not.toBeInTheDocument();
+    expect(orderPanel.queryByLabelText("第 2 位")).not.toBeInTheDocument();
+    expect(orderPanel.getByText("1/2")).toBeInTheDocument();
+
+    expect(orderPanel.queryByText("关闭")).not.toBeInTheDocument();
+    const p1Switch = orderPanel.getByRole("switch", { name: "P1 在调用顺序中启用" });
+    expect(p1Switch).not.toBeChecked();
+    fireEvent.click(p1Switch);
+
+    await waitFor(() =>
+      expect(setModeProviderEnabled).toHaveBeenCalledWith({
+        modeId: 10,
+        cliKey: "claude",
+        providerId: 1,
+        enabled: true,
+      })
+    );
+    expect(orderPanel.getByText("2/2")).toBeInTheDocument();
   });
 
   it("always shows the 全部 tag even when providers have no custom tags", () => {
@@ -1211,7 +1739,7 @@ describe("pages/providers/ProvidersView", () => {
         <ProvidersView activeCli="claude" setActiveCli={vi.fn()} />
       </QueryClientProvider>
     );
-    fireEvent.click(screen.getByTitle("编辑"));
+    fireEvent.click(screen.getAllByTitle("编辑")[0]!);
     expect(screen.getByTestId("provider-editor")).toHaveTextContent("edit");
 
     rerender(
@@ -1235,69 +1763,6 @@ describe("pages/providers/ProvidersView", () => {
       </QueryClientProvider>
     );
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
-  });
-
-  it("opens validate dialog and closes it when switching activeCli", async () => {
-    vi.mocked(toast).mockClear();
-    vi.mocked(logToConsole).mockClear();
-
-    const providers = [
-      {
-        id: 1,
-        cli_key: "claude",
-        name: "P1",
-        enabled: true,
-        base_urls: ["https://a"],
-        base_url_mode: "order",
-        cost_multiplier: 1,
-        claude_models: { main_model: "claude-3" },
-      },
-    ] as any[];
-
-    vi.mocked(useProvidersListQuery).mockReturnValue({ data: providers, isFetching: false } as any);
-    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
-      data: [],
-      isFetching: false,
-      refetch: vi.fn().mockResolvedValue({ data: [] }),
-    } as any);
-
-    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
-    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
-    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
-    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
-      mutateAsync: vi.fn(),
-    } as any);
-    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
-
-    const client = createTestQueryClient();
-    const { rerender } = render(
-      <QueryClientProvider client={client}>
-        <ProvidersView activeCli="claude" setActiveCli={vi.fn()} />
-      </QueryClientProvider>
-    );
-
-    fireEvent.pointerDown(screen.getByText("已启用"));
-    fireEvent.click(screen.getByTitle("模型验证"));
-    expect(screen.getByText("validate")).toBeInTheDocument();
-
-    rerender(
-      <QueryClientProvider client={client}>
-        <ProvidersView activeCli="codex" setActiveCli={vi.fn()} />
-      </QueryClientProvider>
-    );
-
-    await waitFor(() => expect(screen.queryByText("validate")).not.toBeInTheDocument());
-
-    rerender(
-      <QueryClientProvider client={client}>
-        <ProvidersView activeCli="claude" setActiveCli={vi.fn()} />
-      </QueryClientProvider>
-    );
-    fireEvent.click(screen.getByTitle("模型验证"));
-    expect(screen.getByText("validate")).toBeInTheDocument();
-
-    fireEvent.click(screen.getByRole("button", { name: "close-validate" }));
-    await waitFor(() => expect(screen.queryByText("validate")).not.toBeInTheDocument());
   });
 
   it("covers dialog onOpenChange/onSaved callbacks and delete dialog close gating", async () => {
@@ -1367,7 +1832,7 @@ describe("pages/providers/ProvidersView", () => {
     await waitFor(() => expect(screen.queryByTestId("provider-editor")).not.toBeInTheDocument());
 
     // edit dialog onSaved + onOpenChange
-    fireEvent.click(screen.getByTitle("编辑"));
+    fireEvent.click(screen.getAllByTitle("编辑")[0]!);
     const editEditor = screen
       .getAllByTestId("provider-editor")
       .find((el) => el.textContent?.includes("edit"));
@@ -1397,6 +1862,88 @@ describe("pages/providers/ProvidersView", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
   });
 
+  it("restores providers list scroll position after editing saves and background refresh completes", async () => {
+    const providers = [
+      {
+        id: 1,
+        cli_key: "claude",
+        name: "P1",
+        enabled: true,
+        base_urls: ["https://a"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 2,
+        cli_key: "claude",
+        name: "P2",
+        enabled: true,
+        base_urls: ["https://b"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+    ] as any[];
+
+    let providersFetching = false;
+    vi.mocked(useProvidersListQuery).mockImplementation(() => {
+      return { data: providers, isFetching: providersFetching } as any;
+    });
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn().mockResolvedValue({ data: [] }),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    const client = createTestQueryClient();
+    const { rerender } = render(
+      <QueryClientProvider client={client}>
+        <ProvidersView activeCli="claude" setActiveCli={vi.fn()} />
+      </QueryClientProvider>
+    );
+
+    const providersScrollContainer = document.querySelectorAll(".scrollbar-overlay")[0] as
+      | HTMLElement
+      | undefined;
+    expect(providersScrollContainer).toBeTruthy();
+
+    providersScrollContainer!.scrollTop = 180;
+
+    fireEvent.click(screen.getAllByTitle("编辑")[0]!);
+    const editEditor = screen
+      .getAllByTestId("provider-editor")
+      .find((el) => el.textContent?.includes("edit"));
+    expect(editEditor).toBeTruthy();
+
+    fireEvent.click(within(editEditor as HTMLElement).getByRole("button", { name: "saved" }));
+
+    // 模拟后台刷新临时替换列表内容，导致浏览器滚动位置被重置。
+    providersFetching = true;
+    providersScrollContainer!.scrollTop = 0;
+    rerender(
+      <QueryClientProvider client={client}>
+        <ProvidersView activeCli="claude" setActiveCli={vi.fn()} />
+      </QueryClientProvider>
+    );
+
+    providersFetching = false;
+    rerender(
+      <QueryClientProvider client={client}>
+        <ProvidersView activeCli="claude" setActiveCli={vi.fn()} />
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => expect(providersScrollContainer!.scrollTop).toBe(180));
+  });
+
   it("covers providers loading and empty branches", () => {
     vi.mocked(useProvidersListQuery).mockReturnValue({ data: [], isFetching: true } as any);
     vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
@@ -1423,7 +1970,7 @@ describe("pages/providers/ProvidersView", () => {
         <ProvidersView activeCli="claude" setActiveCli={vi.fn()} />
       </QueryClientProvider>
     );
-    expect(screen.getByText("暂无 Provider")).toBeInTheDocument();
+    expect(screen.getByText("暂无供应商")).toBeInTheDocument();
   });
 
   it("covers mutation null/error branches and drag end edge cases", async () => {
@@ -1477,6 +2024,10 @@ describe("pages/providers/ProvidersView", () => {
     const toggleMutation = { mutateAsync: vi.fn() };
     toggleMutation.mutateAsync.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error("boom"));
     vi.mocked(useProviderSetEnabledMutation).mockReturnValue(toggleMutation as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 2 }],
+      isFetching: false,
+    } as any);
 
     const resetProviderMutation = { mutateAsync: vi.fn() };
     resetProviderMutation.mutateAsync
@@ -1504,10 +2055,11 @@ describe("pages/providers/ProvidersView", () => {
     renderWithQuery(<ProvidersView activeCli="claude" setActiveCli={vi.fn()} />);
 
     // toggle enabled: null branch, then error branch after the per-provider gate releases
-    fireEvent.click(screen.getAllByRole("switch")[1]!);
+    const orderPanel = within(screen.getByRole("complementary", { name: "供应商调用顺序" }));
+    fireEvent.click(orderPanel.getByRole("switch", { name: "P2 在调用顺序中启用" }));
     await waitFor(() => expect(toggleMutation.mutateAsync).toHaveBeenCalledTimes(1));
     await Promise.resolve();
-    fireEvent.click(screen.getAllByRole("switch")[1]!);
+    fireEvent.click(orderPanel.getByRole("switch", { name: "P2 在调用顺序中启用" }));
     await waitFor(() => expect(toggleMutation.mutateAsync).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(toast).toHaveBeenCalledWith("更新失败：Error: boom"));
 
@@ -1544,13 +2096,13 @@ describe("pages/providers/ProvidersView", () => {
     await waitFor(() => expect(deleteMutation.mutateAsync).toHaveBeenCalledTimes(2));
 
     // drag end edge cases
-    latestOnDragEnd?.({ active: { id: 1 }, over: null });
-    latestOnDragEnd?.({ active: { id: 1 }, over: { id: 1 } });
-    latestOnDragEnd?.({ active: { id: 999 }, over: { id: 2 } });
-    latestOnDragEnd?.({ active: { id: 1 }, over: { id: 3 } });
+    dragProviderPool({ active: { id: 1 }, over: null });
+    dragProviderPool({ active: { id: 1 }, over: { id: 1 } });
+    dragProviderPool({ active: { id: 999 }, over: { id: 2 } });
+    dragProviderPool({ active: { id: 1 }, over: { id: 3 } });
     await waitFor(() => expect(reorderMutation.mutateAsync).toHaveBeenCalledTimes(1));
     await Promise.resolve();
-    latestOnDragEnd?.({ active: { id: 1 }, over: { id: 3 } });
+    dragProviderPool({ active: { id: 1 }, over: { id: 3 } });
     await waitFor(() => expect(reorderMutation.mutateAsync).toHaveBeenCalledTimes(2));
     await waitFor(() => expect(toast).toHaveBeenCalledWith("顺序更新失败：Error: boom"));
 
@@ -1581,6 +2133,10 @@ describe("pages/providers/ProvidersView", () => {
     ] as any[];
 
     vi.mocked(useProvidersListQuery).mockReturnValue({ data: providers, isFetching: false } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }],
+      isFetching: false,
+    } as any);
 
     vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
       data: [
@@ -1607,7 +2163,9 @@ describe("pages/providers/ProvidersView", () => {
 
     expect(screen.getByText("模型映射 1/5")).toBeInTheDocument();
     expect(screen.getByText(/^熔断\s*00:10$/)).toBeInTheDocument();
-    expect(screen.getByText("调用顺序").closest("aside")?.querySelector(".shadow-lg")).toBeTruthy();
+    expect(
+      screen.getByText("调用顺序").closest("aside")?.querySelector(".cursor-grab")
+    ).toBeTruthy();
   });
 
   it("clears circuit auto-refresh timer when circuits recover", () => {
@@ -1807,7 +2365,7 @@ describe("pages/providers/ProvidersView", () => {
       </QueryClientProvider>
     );
 
-    latestOnDragEnd?.({ active: { id: 1 }, over: { id: 3 } });
+    dragProviderPool({ active: { id: 1 }, over: { id: 3 } });
     await waitFor(() => expect(reorderMutation.mutateAsync).toHaveBeenCalled());
 
     rerender(
@@ -1822,5 +2380,710 @@ describe("pages/providers/ProvidersView", () => {
     await Promise.resolve();
 
     expect(vi.mocked(toast)).not.toHaveBeenCalledWith("顺序已更新");
+  });
+
+  it("covers provider availability test success, failure, null, thrown error, and in-flight guard", async () => {
+    vi.mocked(toast).mockClear();
+    vi.mocked(logToConsole).mockClear();
+
+    const provider = {
+      id: 1,
+      cli_key: "claude",
+      name: "P1",
+      enabled: true,
+      base_urls: ["https://a"],
+      base_url_mode: "order",
+      cost_multiplier: 1,
+      claude_models: {},
+    } as any;
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: [provider],
+      isFetching: false,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    let resolveFirst: (value: any) => void = () => {
+      throw new Error("resolveFirst not set");
+    };
+    const firstPromise = new Promise((resolve) => {
+      resolveFirst = resolve;
+    });
+    const testMutation = {
+      mutateAsync: vi
+        .fn()
+        .mockReturnValueOnce(firstPromise)
+        .mockResolvedValueOnce({ ok: false, latency_ms: null, status: 503, error: null })
+        .mockResolvedValueOnce(null)
+        .mockRejectedValueOnce(new Error("probe down")),
+    };
+    vi.mocked(useProviderTestAvailabilityMutation).mockReturnValue(testMutation as any);
+
+    const { result } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    let first: Promise<void> | undefined;
+    let guarded: Promise<void> | undefined;
+    act(() => {
+      first = result.current.testProviderAvailability(provider);
+      guarded = result.current.testProviderAvailability(provider);
+    });
+    expect(testMutation.mutateAsync).toHaveBeenCalledTimes(1);
+    await guarded;
+
+    await act(async () => {
+      resolveFirst({ ok: true, latency_ms: 42, status: 200, error: null });
+      await first;
+    });
+    expect(toast).toHaveBeenCalledWith("P1: 可用 (42ms)");
+    expect(logToConsole).toHaveBeenCalledWith(
+      "info",
+      "供应商可用性测试",
+      expect.objectContaining({ provider_id: 1, ok: true })
+    );
+    await waitFor(() => expect(result.current.testingByProviderId[1]).toBeUndefined());
+
+    await act(async () => {
+      await result.current.testProviderAvailability(provider);
+      await result.current.testProviderAvailability(provider);
+      await result.current.testProviderAvailability(provider);
+    });
+
+    expect(toast).toHaveBeenCalledWith("P1: 不可用 — 未知错误");
+    expect(toast).toHaveBeenCalledWith("测试失败：Error: probe down");
+    expect(testMutation.mutateAsync).toHaveBeenCalledTimes(4);
+
+    // The test dialog holds its target in the view model and forwards its overrides to the probe.
+    act(() => {
+      result.current.setTestTarget(provider);
+    });
+    expect(result.current.testTarget).toBe(provider);
+
+    await act(async () => {
+      await result.current.testProviderAvailability(provider, {
+        model: "grok-4.6",
+        prompt: "你好",
+      });
+    });
+    expect(testMutation.mutateAsync).toHaveBeenLastCalledWith({
+      providerId: 1,
+      model: "grok-4.6",
+      prompt: "你好",
+    });
+
+    act(() => {
+      result.current.setTestTarget(null);
+    });
+    expect(result.current.testTarget).toBeNull();
+  });
+
+  it("persists default route add, remove, drag, and error branches", async () => {
+    vi.mocked(toast).mockClear();
+    vi.mocked(logToConsole).mockClear();
+
+    const providers = [
+      {
+        id: 1,
+        cli_key: "claude",
+        name: "P1",
+        enabled: true,
+        base_urls: ["https://a"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 2,
+        cli_key: "claude",
+        name: "P2",
+        enabled: true,
+        base_urls: ["https://b"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 3,
+        cli_key: "claude",
+        name: "P3",
+        enabled: true,
+        base_urls: ["https://c"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+    ] as any[];
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({ data: providers, isFetching: false } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }, { provider_id: 2 }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    const defaultRouteMutation = {
+      mutateAsync: vi
+        .fn()
+        .mockResolvedValueOnce([{ provider_id: 1 }, { provider_id: 2 }, { provider_id: 3 }])
+        .mockResolvedValueOnce([{ provider_id: 2 }])
+        .mockRejectedValueOnce(new Error("route down")),
+    };
+    vi.mocked(useDefaultRouteProvidersSetOrderMutation).mockReturnValue(
+      defaultRouteMutation as any
+    );
+
+    const { result } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    act(() => {
+      result.current.addProviderToCurrentRoute(1);
+      result.current.addProviderToCurrentRoute(3);
+    });
+    await waitFor(() => expect(defaultRouteMutation.mutateAsync).toHaveBeenCalledTimes(1));
+    expect(defaultRouteMutation.mutateAsync).toHaveBeenNthCalledWith(1, {
+      cliKey: "claude",
+      orderedProviderIds: [1, 2, 3],
+      optimisticRows: [{ provider_id: 1 }, { provider_id: 2 }, { provider_id: 3 }],
+    });
+    expect(toast).toHaveBeenCalledWith("Default 调用顺序已更新");
+
+    act(() => {
+      result.current.removeProviderFromCurrentRoute(3);
+      result.current.removeProviderFromCurrentRoute(1);
+    });
+    await waitFor(() => expect(defaultRouteMutation.mutateAsync).toHaveBeenCalledTimes(2));
+    expect(defaultRouteMutation.mutateAsync).toHaveBeenNthCalledWith(2, {
+      cliKey: "claude",
+      orderedProviderIds: [2],
+      optimisticRows: [{ provider_id: 2 }],
+    });
+
+    act(() => {
+      result.current.handleRouteDragEnd({ active: { id: 1 }, over: { id: 2 } } as any);
+      result.current.handleRouteDragEnd({ active: { id: 1 }, over: { id: 1 } } as any);
+      result.current.handleRouteDragEnd({ active: { id: 99 }, over: { id: 2 } } as any);
+      result.current.handleRouteDragEnd({ active: { id: 1 }, over: null } as any);
+    });
+    await waitFor(() => expect(defaultRouteMutation.mutateAsync).toHaveBeenCalledTimes(3));
+    expect(defaultRouteMutation.mutateAsync).toHaveBeenNthCalledWith(3, {
+      cliKey: "claude",
+      orderedProviderIds: [2, 1],
+      optimisticRows: [{ provider_id: 2 }, { provider_id: 1 }],
+    });
+    await waitFor(() => expect(toast).toHaveBeenCalledWith("调用顺序更新失败：Error: route down"));
+    expect(logToConsole).toHaveBeenCalledWith(
+      "error",
+      "更新调用顺序失败",
+      expect.objectContaining({ route: "default" })
+    );
+  });
+
+  it("manages sort mode CRUD, member changes, route persistence, and activation confirmation", async () => {
+    vi.mocked(toast).mockClear();
+    vi.mocked(logToConsole).mockClear();
+
+    const providers = [
+      {
+        id: 1,
+        cli_key: "claude",
+        name: "P1",
+        enabled: true,
+        base_urls: ["https://a"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 2,
+        cli_key: "claude",
+        name: "P2",
+        enabled: true,
+        base_urls: ["https://b"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+    ] as any[];
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({ data: providers, isFetching: false } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useGatewaySessionsListQuery).mockReturnValue({
+      data: [{ id: 1, cli_key: "claude" }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useSortModesListQuery).mockReturnValue({
+      data: [{ id: 10, name: "Review", created_at: 1, updated_at: 1 }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+      data: [{ cli_key: "claude", mode_id: null }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useSortModeProvidersListQuery).mockReturnValue({
+      data: [{ provider_id: 1, enabled: true }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    const createMode = vi.fn().mockResolvedValue({ id: 20, name: "New Mode" });
+    const renameMode = vi.fn().mockResolvedValue({ id: 10, name: "Renamed" });
+    const deleteMode = vi.fn().mockResolvedValue(true);
+    const activeSet = vi.fn().mockResolvedValue({ cli_key: "claude", mode_id: 10 });
+    const modeSetOrder = vi
+      .fn()
+      .mockResolvedValueOnce([
+        { provider_id: 1, enabled: true },
+        { provider_id: 2, enabled: true },
+      ])
+      .mockRejectedValueOnce(new Error("mode order down"));
+    const modeSetEnabled = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("member down"))
+      .mockResolvedValueOnce({ provider_id: 1, enabled: false });
+    vi.mocked(useSortModeCreateMutation).mockReturnValue({ mutateAsync: createMode } as any);
+    vi.mocked(useSortModeRenameMutation).mockReturnValue({ mutateAsync: renameMode } as any);
+    vi.mocked(useSortModeDeleteMutation).mockReturnValue({ mutateAsync: deleteMode } as any);
+    vi.mocked(useSortModeActiveSetMutation).mockReturnValue({ mutateAsync: activeSet } as any);
+    vi.mocked(useSortModeProvidersSetOrderMutation).mockReturnValue({
+      mutateAsync: modeSetOrder,
+    } as any);
+    vi.mocked(useSortModeProviderSetEnabledMutation).mockReturnValue({
+      mutateAsync: modeSetEnabled,
+    } as any);
+
+    const { result } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    act(() => {
+      result.current.setCreateModeDialogOpen(true);
+      result.current.setCreateModeName("  New Mode  ");
+    });
+    await act(async () => {
+      await result.current.createSortMode();
+    });
+    expect(createMode).toHaveBeenCalledWith({ name: "New Mode" });
+    expect(toast).toHaveBeenCalledWith("排序模板已创建");
+
+    act(() => {
+      result.current.selectRouteDraft("mode:10");
+    });
+    await waitFor(() => expect(result.current.selectedSortMode?.id).toBe(10));
+
+    act(() => {
+      result.current.setRenameModeDialogOpen(true);
+      result.current.setRenameModeName("  Renamed  ");
+    });
+    await act(async () => {
+      await result.current.renameSortMode();
+    });
+    expect(renameMode).toHaveBeenCalledWith({ modeId: 10, name: "Renamed" });
+    expect(toast).toHaveBeenCalledWith("排序模板已更新");
+
+    act(() => {
+      result.current.addProviderToCurrentRoute(2);
+    });
+    await waitFor(() => expect(modeSetOrder).toHaveBeenCalledTimes(1));
+    expect(modeSetOrder).toHaveBeenNthCalledWith(1, {
+      modeId: 10,
+      cliKey: "claude",
+      orderedProviderIds: [1, 2],
+    });
+    expect(toast).toHaveBeenCalledWith("模板调用顺序已更新");
+
+    await act(async () => {
+      await result.current.setRouteProviderEnabled(1, false);
+    });
+    expect(modeSetEnabled).toHaveBeenNthCalledWith(1, {
+      modeId: 10,
+      cliKey: "claude",
+      providerId: 1,
+      enabled: false,
+    });
+    expect(toast).toHaveBeenCalledWith("模板成员状态更新失败：Error: member down");
+
+    await act(async () => {
+      await result.current.setRouteProviderEnabled(1, false);
+    });
+    expect(modeSetEnabled).toHaveBeenCalledTimes(2);
+    expect(toast).toHaveBeenCalledWith("模板成员已关闭");
+
+    act(() => {
+      result.current.removeProviderFromCurrentRoute(1);
+    });
+    await waitFor(() => expect(modeSetOrder).toHaveBeenCalledTimes(2));
+    expect(toast).toHaveBeenCalledWith("调用顺序更新失败：Error: mode order down");
+
+    act(() => {
+      result.current.setCurrentRouteActive();
+    });
+    await waitFor(() =>
+      expect(result.current.pendingRouteActivation).toEqual(
+        expect.objectContaining({ cliKey: "claude", modeId: 10, activeSessionCount: 1 })
+      )
+    );
+    act(() => {
+      result.current.confirmPendingRouteActivation();
+    });
+    await waitFor(() => expect(activeSet).toHaveBeenCalledWith({ cliKey: "claude", modeId: 10 }));
+    expect(toast).toHaveBeenCalledWith("已激活：Review");
+
+    act(() => {
+      result.current.setDeleteModeTarget({ id: 10, name: "Review", created_at: 1, updated_at: 1 });
+    });
+    await act(async () => {
+      await result.current.deleteSortMode();
+    });
+    expect(deleteMode).toHaveBeenCalledWith({ modeId: 10 });
+    expect(toast).toHaveBeenCalledWith("排序模板已删除");
+  });
+
+  it("covers hook setter callbacks, empty guards, and provider filters", async () => {
+    vi.mocked(toast).mockClear();
+    vi.mocked(providerDuplicate).mockResolvedValueOnce(null as any);
+
+    const providers = [
+      {
+        id: 1,
+        cli_key: "claude",
+        name: "Alpha Relay",
+        enabled: true,
+        base_urls: ["https://a"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+        tags: ["prod"],
+      },
+      {
+        id: 2,
+        cli_key: "codex",
+        name: "Beta Gateway",
+        enabled: true,
+        base_urls: ["https://b"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+        tags: ["stage"],
+      },
+    ] as any[];
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: providers,
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }, { provider_id: 99 }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    const { result } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    expect(result.current.callableRouteCount).toBe(1);
+
+    act(() => {
+      result.current.setProviderSearch((current) => `${current}alpha`);
+      result.current.setSelectedTags((current) => new Set([...current, "prod"]));
+      result.current.setCreateDialogState(
+        (current) => current ?? { cliKey: "claude", initialValues: null }
+      );
+      result.current.setEditTarget((current) => current ?? providers[0]);
+      result.current.setDeleteTarget((current) => current ?? providers[0]);
+      result.current.setCreateModeDialogOpen((open) => open);
+      result.current.setCreateModeName((name) => `${name}   `);
+      result.current.setRenameModeDialogOpen((open) => open);
+      result.current.setRenameModeName((name) => `${name}   `);
+      result.current.selectRouteDraft("mode:not-a-number");
+      result.current.selectRouteDraft("default");
+      result.current.handleDragEnd({ active: { id: 2 }, over: { id: 1 } } as any);
+      result.current.confirmPendingRouteActivation();
+      result.current.removeProviderFromCurrentRoute(3);
+    });
+
+    expect(result.current.filteredProviders.map((provider) => provider.name)).toEqual([
+      "Alpha Relay",
+    ]);
+
+    await act(async () => {
+      await result.current.copyTerminalLaunchCommand(providers[1]);
+      await result.current.createSortMode();
+      await result.current.renameSortMode();
+      await result.current.deleteSortMode();
+      await result.current.duplicateProvider(providers[0]);
+    });
+
+    expect(providerDuplicate).toHaveBeenCalledWith(1);
+    expect(toast).not.toHaveBeenCalledWith(expect.stringContaining("已复制 Provider"));
+  });
+
+  it("activates the default route directly and guards duplicate activation attempts", async () => {
+    vi.mocked(toast).mockClear();
+    vi.mocked(logToConsole).mockClear();
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useGatewaySessionsListQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+    } as any);
+    vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+      data: [{ cli_key: "claude", mode_id: 10 }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    let resolveActivation: (value: unknown) => void = () => {
+      throw new Error("resolveActivation not set");
+    };
+    const activationPromise = new Promise((resolve) => {
+      resolveActivation = resolve;
+    });
+    const activeSet = vi.fn().mockReturnValueOnce(activationPromise);
+    vi.mocked(useSortModeActiveSetMutation).mockReturnValue({ mutateAsync: activeSet } as any);
+
+    const { result, rerender } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    act(() => {
+      result.current.setCurrentRouteActive();
+      result.current.setCurrentRouteActive();
+    });
+
+    expect(activeSet).toHaveBeenCalledTimes(1);
+    expect(activeSet).toHaveBeenCalledWith({ cliKey: "claude", modeId: null });
+
+    await act(async () => {
+      resolveActivation({ cli_key: "claude", mode_id: null });
+      await activationPromise;
+    });
+    expect(toast).toHaveBeenCalledWith("已切回：Default");
+
+    vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+      data: [{ cli_key: "claude", mode_id: null }],
+      isLoading: false,
+    } as any);
+    rerender();
+
+    act(() => {
+      result.current.setCurrentRouteActive();
+    });
+    expect(activeSet).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports direct route activation failures", async () => {
+    vi.mocked(toast).mockClear();
+    vi.mocked(logToConsole).mockClear();
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useGatewaySessionsListQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+    } as any);
+    vi.mocked(useSortModeActiveListQuery).mockReturnValue({
+      data: [{ cli_key: "claude", mode_id: 10 }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    const activeSet = vi.fn().mockRejectedValue(new Error("activation down"));
+    vi.mocked(useSortModeActiveSetMutation).mockReturnValue({ mutateAsync: activeSet } as any);
+
+    const { result } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    act(() => {
+      result.current.setCurrentRouteActive();
+    });
+
+    await waitFor(() =>
+      expect(toast).toHaveBeenCalledWith("切换排序模板失败：Error: activation down")
+    );
+    expect(logToConsole).toHaveBeenCalledWith(
+      "error",
+      "切换排序模板失败",
+      expect.objectContaining({ cli: "claude", mode_id: null })
+    );
+  });
+
+  it("guards mode route persistence while a save is already running", async () => {
+    vi.mocked(toast).mockClear();
+
+    const providers = [
+      {
+        id: 1,
+        cli_key: "claude",
+        name: "P1",
+        enabled: true,
+        base_urls: ["https://a"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+      {
+        id: 2,
+        cli_key: "claude",
+        name: "P2",
+        enabled: true,
+        base_urls: ["https://b"],
+        base_url_mode: "order",
+        cost_multiplier: 1,
+        claude_models: {},
+      },
+    ] as any[];
+
+    vi.mocked(useProvidersListQuery).mockReturnValue({ data: providers, isFetching: false } as any);
+    vi.mocked(useGatewayCircuitStatusQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      refetch: vi.fn(),
+    } as any);
+    vi.mocked(useDefaultRouteProvidersQuery).mockReturnValue({
+      data: [{ provider_id: 1 }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useSortModesListQuery).mockReturnValue({
+      data: [{ id: 10, name: "Review", created_at: 1, updated_at: 1 }],
+      isLoading: false,
+    } as any);
+    vi.mocked(useSortModeProvidersListQuery).mockReturnValue({
+      data: [{ provider_id: 1, enabled: true }],
+      isFetching: false,
+    } as any);
+    vi.mocked(useProviderSetEnabledMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProviderDeleteMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useProvidersReorderMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+    vi.mocked(useGatewayCircuitResetProviderMutation).mockReturnValue({
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(useGatewayCircuitResetCliMutation).mockReturnValue({ mutateAsync: vi.fn() } as any);
+
+    let resolveModeOrder: (rows: any[]) => void = () => {
+      throw new Error("resolveModeOrder not set");
+    };
+    const modeOrderPromise = new Promise<any[]>((resolve) => {
+      resolveModeOrder = resolve;
+    });
+    const modeSetOrder = vi.fn().mockReturnValue(modeOrderPromise);
+    const modeSetEnabled = vi.fn();
+    vi.mocked(useSortModeProvidersSetOrderMutation).mockReturnValue({
+      mutateAsync: modeSetOrder,
+    } as any);
+    vi.mocked(useSortModeProviderSetEnabledMutation).mockReturnValue({
+      mutateAsync: modeSetEnabled,
+    } as any);
+
+    const { result } = renderHook(() => useProvidersViewDataModel("claude"), {
+      wrapper: queryWrapper(),
+    });
+
+    act(() => {
+      result.current.selectRouteDraft("mode:10");
+    });
+    await waitFor(() =>
+      expect(result.current.routeDraftSelection).toEqual({ kind: "mode", modeId: 10 })
+    );
+
+    act(() => {
+      result.current.addProviderToCurrentRoute(2);
+      result.current.removeProviderFromCurrentRoute(1);
+    });
+    await waitFor(() => expect(modeSetOrder).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await result.current.setRouteProviderEnabled(1, false);
+    });
+    expect(modeSetEnabled).not.toHaveBeenCalled();
+
+    await act(async () => {
+      resolveModeOrder([
+        { provider_id: 1, enabled: true },
+        { provider_id: 2, enabled: true },
+      ]);
+      await modeOrderPromise;
+    });
+    expect(toast).toHaveBeenCalledWith("模板调用顺序已更新");
   });
 });

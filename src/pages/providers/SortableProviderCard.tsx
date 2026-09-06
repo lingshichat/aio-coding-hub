@@ -1,42 +1,42 @@
 import {
+  cloneElement,
+  isValidElement,
   memo,
+  type ButtonHTMLAttributes,
   type HTMLAttributes,
   type MouseEvent as ReactMouseEvent,
+  type ReactElement,
   type ReactNode,
 } from "react";
 import { useMemo, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { useSortable } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { Copy, FlaskConical, Pencil, RefreshCw, Terminal, Trash2, Zap } from "lucide-react";
+import { Copy, GripVertical, Pencil, RefreshCw, Terminal, Trash2, Zap } from "lucide-react";
 import { FREE_TAG } from "../../constants/providers";
 import type { GatewayProviderCircuitStatus } from "../../services/gateway/gateway";
 import { getGatewayCircuitDerivedState } from "../../query/gateway";
-import { refreshProviderOAuthLimits, useOAuthLimitsQuery } from "../../query/providers";
+import {
+  refreshProviderOAuthLimits,
+  resetProviderOAuthCodexQuota,
+  useOAuthLimitsQuery,
+} from "../../query/providers";
 import {
   getProviderTypeInfo,
   type ClaudeModels,
-  type OAuthLimitsResult,
   type ProviderSummary,
 } from "../../services/providers/providers";
+import { OAuthQuotaUsageInline } from "../../components/providers/OAuthQuotaUsageInline";
 import { openDesktopUrl } from "../../services/desktop/opener";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
-import { Switch } from "../../ui/Switch";
+import { ConfirmDialog } from "../../ui/ConfirmDialog";
 import { useNowUnix } from "../../hooks/useNowUnix";
 import { cn } from "../../utils/cn";
 import { formatCountdownSeconds, formatUnixSeconds, formatUsdRaw } from "../../utils/formatters";
 import { providerBaseUrlSummary } from "./baseUrl";
 
 const NOTE_URL_RE = /https?:\/\/[^\s]+/g;
-
-function getOAuthShortWindowLabel(
-  provider: ProviderSummary,
-  oauthLimits: OAuthLimitsResult | null
-) {
-  if (provider.cli_key === "gemini") return "短窗";
-  return oauthLimits?.limit_short_label ?? "5h";
-}
 
 function getConfiguredClaudeModelMappings(claudeModels: ClaudeModels | null | undefined) {
   const fields: Array<[label: string, value: string | null | undefined]> = [
@@ -77,10 +77,10 @@ function providerTagClassName(tag: string) {
   if (tag === FREE_TAG) {
     return "shrink-0 rounded-full bg-emerald-100 px-2 py-0.5 text-[10px] text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300";
   }
-  return "shrink-0 rounded-full bg-slate-50 px-2 py-0.5 text-[10px] text-slate-600 dark:bg-slate-800 dark:text-slate-300";
+  return "shrink-0 rounded-full bg-secondary px-2 py-0.5 text-[10px] text-muted-foreground dark:bg-secondary dark:text-secondary-foreground";
 }
 
-function renderProviderNote(note: string) {
+function ProviderNote({ note }: { note: string }) {
   const nodes: ReactNode[] = [];
   let lastIndex = 0;
 
@@ -118,20 +118,29 @@ function renderProviderNote(note: string) {
     nodes.push(note.slice(lastIndex));
   }
 
-  return nodes.length > 0 ? nodes : [note];
+  return <>{nodes.length > 0 ? nodes : note}</>;
+}
+
+function EdgeAction({ children }: { children: ReactNode }) {
+  if (!isValidElement(children)) return <>{children}</>;
+
+  const element = children as ReactElement<{ className?: string }>;
+  return cloneElement(element, {
+    className: cn(element.props.className, "w-full justify-center"),
+  });
 }
 
 export type SortableProviderCardProps = {
   provider: ProviderSummary;
   sourceProviderName?: string | null;
   sourceProvider?: ProviderSummary | null;
+  trailing?: ReactNode;
+  children?: ReactNode;
   circuit: GatewayProviderCircuitStatus | null;
   circuitResetting: boolean;
-  onToggleEnabled: (provider: ProviderSummary) => void;
   onResetCircuit: (provider: ProviderSummary) => void;
   onCopyTerminalLaunchCommand?: (provider: ProviderSummary) => void;
   terminalLaunchCopying?: boolean;
-  onValidateModel?: (provider: ProviderSummary) => void;
   onTestAvailability?: (provider: ProviderSummary) => void;
   testAvailabilityLoading?: boolean;
   onDuplicate?: (provider: ProviderSummary) => void;
@@ -142,19 +151,20 @@ export type SortableProviderCardProps = {
 
 type ProviderCardProps = SortableProviderCardProps & {
   className?: string;
+  dragHandleProps?: ButtonHTMLAttributes<HTMLButtonElement>;
 } & HTMLAttributes<HTMLDivElement>;
 
-export const ProviderCard = memo(function ProviderCard({
+const ProviderCard = memo(function ProviderCard({
   provider,
   sourceProviderName = null,
   sourceProvider = null,
+  trailing = null,
+  children = null,
   circuit,
   circuitResetting,
-  onToggleEnabled,
   onResetCircuit,
   onCopyTerminalLaunchCommand,
   terminalLaunchCopying = false,
-  onValidateModel,
   onTestAvailability,
   testAvailabilityLoading = false,
   onDuplicate,
@@ -162,8 +172,10 @@ export const ProviderCard = memo(function ProviderCard({
   onEdit,
   onDelete,
   className,
+  dragHandleProps,
   ...cardProps
 }: ProviderCardProps) {
+  const trailingContent = trailing ?? children;
   const claudeModelMappings = getConfiguredClaudeModelMappings(provider.claude_models);
   const claudeModelsCount = claudeModelMappings.length;
   const hasClaudeModels = claudeModelsCount > 0;
@@ -184,17 +196,19 @@ export const ProviderCard = memo(function ProviderCard({
   const hasLimits = limitChips.length > 0;
 
   const circuitState = useMemo(() => getGatewayCircuitDerivedState(circuit), [circuit]);
-  const { isUnavailable, unavailableUntil } = circuitState;
+  const { displayState, isUnavailable, unavailableUntil } = circuitState;
   const { isOAuth, isCx2cc, isCx2ccGateway } = getProviderTypeInfo(provider);
   const [apiKeyDetailsVisible, setApiKeyDetailsVisible] = useState(false);
   const [limitsRefreshing, setLimitsRefreshing] = useState(false);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState(false);
+  const [resettingCodexQuota, setResettingCodexQuota] = useState(false);
+  const [resetError, setResetError] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const { data: oauthLimits = null, isLoading: limitsQueryLoading } = useOAuthLimitsQuery(
     provider.id,
     isOAuth
   );
   const limitsLoading = limitsQueryLoading || limitsRefreshing;
-  const oauthShortLabel = getOAuthShortWindowLabel(provider, oauthLimits);
   const shouldTrackNowUnix =
     isUnavailable ||
     (isOAuth &&
@@ -205,6 +219,31 @@ export const ProviderCard = memo(function ProviderCard({
     unavailableUntil != null ? Math.max(0, unavailableUntil - nowUnix) : null;
   const unavailableCountdown =
     unavailableRemaining != null ? formatCountdownSeconds(unavailableRemaining) : null;
+  // 四态徽章：open 红“熔断”、cooldown 中性“冷却中”（正名，不再误称熔断）、
+  // half_open 琥珀“试探恢复中”（无倒计时）、healthy 不渲染。
+  const circuitBadge =
+    displayState === "open"
+      ? {
+          label: `熔断${unavailableCountdown ? ` ${unavailableCountdown}` : ""}`,
+          title:
+            unavailableUntil != null ? `熔断至 ${formatUnixSeconds(unavailableUntil)}` : "熔断",
+          className: "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400",
+        }
+      : displayState === "cooldown"
+        ? {
+            label: `冷却中${unavailableCountdown ? ` ${unavailableCountdown}` : ""}`,
+            title:
+              unavailableUntil != null ? `冷却至 ${formatUnixSeconds(unavailableUntil)}` : "冷却中",
+            className:
+              "bg-secondary text-muted-foreground dark:bg-secondary dark:text-secondary-foreground",
+          }
+        : displayState === "half_open"
+          ? {
+              label: "试探恢复中",
+              title: "试探恢复中（半开试探，成功后自动恢复）",
+              className: "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400",
+            }
+          : null;
   const cx2ccSourceName =
     sourceProviderName ??
     sourceProvider?.name ??
@@ -215,337 +254,365 @@ export const ProviderCard = memo(function ProviderCard({
     ? "跟随当前 Codex 分流"
     : (sourceProvider?.base_urls[0] ?? "跟随网关默认路由");
   const visibleTags = provider.tags ?? [];
+  const resetCreditCount =
+    isOAuth && provider.cli_key === "codex"
+      ? (oauthLimits?.reset_credit_available_count ?? null)
+      : null;
+  const showResetCredit = resetCreditCount != null;
+  const canResetCredit = Boolean(
+    showResetCredit && resetCreditCount > 0 && !limitsLoading && !resettingCodexQuota
+  );
 
-  // OAuth 限制重置倒计时
-  const limitsResetCountdown = useMemo(() => {
-    if (!isOAuth || !oauthLimits) return null;
-    const reset5h = oauthLimits.limit_5h_reset_at;
-    const resetWeekly = oauthLimits.limit_weekly_reset_at;
-    if (!reset5h && !resetWeekly) return null;
-
-    const formatReset = (timestamp: number) => {
-      const diff = timestamp - nowUnix;
-      if (diff <= 0) return "已重置";
-      const totalMinutes = Math.floor(diff / 60);
-      if (totalMinutes < 1) return "<1m";
-      const days = Math.floor(totalMinutes / 1440);
-      const hours = Math.floor((totalMinutes % 1440) / 60);
-      const minutes = totalMinutes % 60;
-      if (days > 0) return `${days}d ${hours}h ${minutes}m`;
-      if (hours > 0) return `${hours}h ${minutes}m`;
-      return `${minutes}m`;
-    };
-
-    return {
-      reset5h: reset5h ? formatReset(reset5h) : null,
-      resetWeekly: resetWeekly ? formatReset(resetWeekly) : null,
-    };
-  }, [isOAuth, oauthLimits, nowUnix]);
+  async function handleConfirmCodexReset() {
+    if (!canResetCredit) return;
+    setResettingCodexQuota(true);
+    setResetError(null);
+    try {
+      const result = await resetProviderOAuthCodexQuota(queryClient, provider.id, {
+        resetCircuitAfterRefresh: true,
+      });
+      if (result.refresh_error) {
+        setResetError(`已重置，但刷新用量失败：${result.refresh_error}`);
+      }
+    } catch (error) {
+      setResetError(`重置失败：${String(error)}`);
+    } finally {
+      setResettingCodexQuota(false);
+      setResetConfirmOpen(false);
+    }
+  }
 
   return (
-    <Card
-      padding="sm"
-      className={cn(
-        "rounded-lg sm:rounded-xl flex flex-col gap-2 transition-shadow duration-200 sm:flex-row sm:items-center sm:justify-between",
-        className
-      )}
-      {...cardProps}
-    >
-      <div className="flex min-w-0 items-center gap-3">
-        <div className="inline-flex h-8 w-8 shrink-0 select-none items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-400 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-500">
-          ⠿
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex min-w-0 items-center gap-2">
-            <div className="truncate text-base font-semibold">{provider.name}</div>
-            {isUnavailable ? (
-              <span
-                className="shrink-0 rounded-full bg-rose-50 px-2 py-0.5 font-mono text-[10px] text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
-                title={
-                  unavailableUntil != null
-                    ? `熔断至 ${formatUnixSeconds(unavailableUntil)}`
-                    : "熔断"
-                }
-              >
-                熔断{unavailableCountdown ? ` ${unavailableCountdown}` : ""}
-              </span>
-            ) : null}
-          </div>
-          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-            {isOAuth ? (
-              <button
-                type="button"
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (limitsRefreshing) return;
-                  setLimitsRefreshing(true);
-                  void refreshProviderOAuthLimits(queryClient, provider.id, {
-                    resetCircuitAfterRefresh: true,
-                  })
-                    .catch(() => {})
-                    .finally(() => setLimitsRefreshing(false));
-                }}
-                disabled={limitsLoading}
-                className={cn(
-                  "inline-flex w-16 shrink-0 cursor-pointer items-center justify-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] transition-opacity hover:opacity-80",
-                  provider.oauth_last_error
-                    ? "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
-                    : "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
-                )}
-                title={
-                  provider.oauth_last_error
-                    ? `OAuth 错误: ${provider.oauth_last_error}（点击刷新用量）`
-                    : provider.oauth_email
-                      ? `OAuth: ${provider.oauth_email}（点击刷新用量）`
-                      : "OAuth 已连接（点击刷新用量）"
-                }
-              >
-                <RefreshCw className={cn("h-2.5 w-2.5", limitsLoading && "animate-spin")} />
-                OAuth
-              </button>
-            ) : isCx2cc ? (
-              <span
-                className="inline-flex w-16 shrink-0 items-center justify-center rounded-full px-2 py-0.5 font-mono text-[10px] bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400"
-                title="CX2CC 转译模式"
-              >
-                CX2CC
-              </span>
-            ) : (
-              <>
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setApiKeyDetailsVisible((current) => !current);
-                  }}
-                  className="inline-flex w-16 shrink-0 cursor-pointer items-center justify-center rounded-full px-2 py-0.5 font-mono text-[10px] transition-opacity hover:opacity-80 bg-sky-50 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
-                  title="API Key 认证"
-                >
-                  API Key
-                </button>
-                <span className="shrink-0 rounded-full bg-cyan-50 px-2 py-0.5 font-mono text-[10px] text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300">
-                  {provider.base_url_mode === "ping" ? "Ping" : "顺序"}
-                </span>
-              </>
-            )}
-            {isCx2cc && provider.cost_multiplier !== 0 ? (
-              <span
-                className={cn(
-                  "shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px]",
-                  "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                )}
-                title={`价格倍率: x${provider.cost_multiplier.toFixed(2)}`}
-              >
-                x{provider.cost_multiplier.toFixed(2)}
-              </span>
-            ) : null}
-            {provider.cli_key === "claude" && hasClaudeModels ? (
-              <span
-                className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
-                title={[
-                  `已配置 Claude 模型映射（${claudeModelsCount}/5）`,
-                  ...claudeModelMappings,
-                ].join("\n")}
-              >
-                模型映射 {claudeModelsCount}/5
-              </span>
-            ) : null}
-            {hasLimits ? (
-              <span
-                className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 font-mono text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
-                title={limitChips.join("\n")}
-              >
-                限额
-              </span>
-            ) : null}
-            {visibleTags.map((tag) => (
-              <span key={tag} className={providerTagClassName(tag)} title={`标签: ${tag}`}>
-                {tag}
-              </span>
-            ))}
-          </div>
-          <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
-            {isOAuth ? (
-              <>
-                {provider.oauth_email ? (
-                  <span
-                    className="truncate font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                    title={`OAuth: ${provider.oauth_email}`}
-                  >
-                    {provider.oauth_email}
-                  </span>
-                ) : null}
-                {oauthLimits?.limit_5h_text ? (
-                  <span
-                    className="shrink-0 font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                    title={`${oauthShortLabel} 用量: ${oauthLimits.limit_5h_text}`}
-                  >
-                    {oauthShortLabel}: {oauthLimits.limit_5h_text}
-                  </span>
-                ) : null}
-                {oauthLimits?.limit_weekly_text ? (
-                  <span
-                    className="shrink-0 font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                    title={`周用量: ${oauthLimits.limit_weekly_text}`}
-                  >
-                    周: {oauthLimits.limit_weekly_text}
-                  </span>
-                ) : null}
-                {limitsResetCountdown?.reset5h && oauthLimits?.limit_5h_text ? (
-                  <span
-                    className="shrink-0 font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                    title={`${oauthShortLabel} 重置: ${limitsResetCountdown.reset5h}`}
-                  >
-                    重置: {limitsResetCountdown.reset5h}
-                  </span>
-                ) : null}
-                {limitsResetCountdown?.resetWeekly && oauthLimits?.limit_weekly_text ? (
-                  <span
-                    className="shrink-0 font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                    title={`周重置: ${limitsResetCountdown.resetWeekly}`}
-                  >
-                    周重置: {limitsResetCountdown.resetWeekly}
-                  </span>
-                ) : null}
-              </>
-            ) : isCx2cc ? (
-              <>
-                <span
-                  className="truncate font-mono text-xs text-violet-500 dark:text-violet-400 cursor-default"
-                  title={`来源: ${cx2ccSourceName}`}
-                >
-                  来源: {cx2ccSourceName}
-                </span>
-                <span
-                  className="truncate font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                  title={cx2ccRouteLabel}
-                >
-                  {cx2ccRouteLabel}
-                </span>
-              </>
-            ) : apiKeyDetailsVisible ? (
-              <span
-                className="truncate font-mono text-xs text-slate-500 dark:text-slate-400 cursor-default"
-                title={provider.base_urls.join("\n")}
-              >
-                {providerBaseUrlSummary(provider)}
-              </span>
-            ) : null}
-          </div>
-          {provider.note ? (
-            <div
-              className="mt-1 break-words text-xs text-slate-400 dark:text-slate-500 cursor-default"
-              title={provider.note}
-              onPointerDown={(e) => e.stopPropagation()}
+    <>
+      <Card
+        padding="sm"
+        className={cn(
+          "rounded-lg sm:rounded-xl flex flex-col gap-2 transition-shadow duration-200 sm:flex-row sm:items-stretch sm:justify-between",
+          className
+        )}
+        {...cardProps}
+      >
+        <div className="flex min-w-0 items-center gap-3 sm:flex-1">
+          {dragHandleProps ? (
+            <button
+              type="button"
+              className="inline-flex h-8 w-8 shrink-0 cursor-grab items-center justify-center rounded-lg border border-border bg-white text-muted-foreground transition-colors hover:bg-secondary active:cursor-grabbing dark:border-border dark:bg-secondary dark:text-muted-foreground"
+              title="拖拽排序"
+              aria-label={`拖拽调整 ${provider.name} 顺序`}
+              {...dragHandleProps}
             >
-              {renderProviderNote(provider.note)}
+              <GripVertical className="h-4 w-4" aria-hidden="true" />
+            </button>
+          ) : null}
+          <div className="min-w-0 flex-1">
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="truncate text-base font-semibold">{provider.name}</div>
+              {circuitBadge ? (
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px]",
+                    circuitBadge.className
+                  )}
+                  title={circuitBadge.title}
+                >
+                  {circuitBadge.label}
+                </span>
+              ) : null}
+              {provider.model_policy_status === "invalid" ? (
+                <span
+                  className="shrink-0 rounded-full bg-rose-50 px-2 py-0.5 font-mono text-[10px] text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
+                  title="模型策略无效，该供应商不参与路由；请打开编辑器重新配置"
+                >
+                  策略无效
+                </span>
+              ) : null}
+            </div>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+              {isOAuth ? (
+                <>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      if (limitsRefreshing) return;
+                      setLimitsRefreshing(true);
+                      void refreshProviderOAuthLimits(queryClient, provider.id, {
+                        resetCircuitAfterRefresh: true,
+                      })
+                        .catch(() => {})
+                        .finally(() => setLimitsRefreshing(false));
+                    }}
+                    disabled={limitsLoading}
+                    className={cn(
+                      "inline-flex w-16 shrink-0 cursor-pointer items-center justify-center gap-1 rounded-full px-2 py-0.5 font-mono text-[10px] transition-opacity hover:opacity-80",
+                      provider.oauth_last_error
+                        ? "bg-rose-50 text-rose-700 dark:bg-rose-900/30 dark:text-rose-400"
+                        : "bg-emerald-50 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-400"
+                    )}
+                    title={
+                      provider.oauth_last_error
+                        ? `OAuth 错误: ${provider.oauth_last_error}（点击刷新用量）`
+                        : provider.oauth_email
+                          ? `OAuth: ${provider.oauth_email}（点击刷新用量）`
+                          : "OAuth 已连接（点击刷新用量）"
+                    }
+                  >
+                    <RefreshCw className={cn("h-2.5 w-2.5", limitsLoading && "animate-spin")} />
+                    OAuth
+                  </button>
+                </>
+              ) : isCx2cc ? (
+                <span
+                  className="inline-flex w-16 shrink-0 items-center justify-center rounded-full px-2 py-0.5 font-mono text-[10px] bg-violet-50 text-violet-700 dark:bg-violet-900/30 dark:text-violet-400"
+                  title="CX2CC 转译模式"
+                >
+                  CX2CC
+                </span>
+              ) : (
+                <>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setApiKeyDetailsVisible((current) => !current);
+                    }}
+                    className="inline-flex w-16 shrink-0 cursor-pointer items-center justify-center rounded-full px-2 py-0.5 font-mono text-[10px] transition-opacity hover:opacity-80 bg-sky-50 text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+                    title="API Key 认证"
+                  >
+                    API Key
+                  </button>
+                  <span className="shrink-0 rounded-full bg-cyan-50 px-2 py-0.5 font-mono text-[10px] text-cyan-700 dark:bg-cyan-900/30 dark:text-cyan-300">
+                    {provider.base_url_mode === "ping" ? "Ping" : "顺序"}
+                  </span>
+                </>
+              )}
+              {isCx2cc && provider.cost_multiplier !== 0 ? (
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full px-2 py-0.5 font-mono text-[10px]",
+                    "bg-amber-50 text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                  )}
+                  title={`价格倍率: x${provider.cost_multiplier.toFixed(2)}`}
+                >
+                  x{provider.cost_multiplier.toFixed(2)}
+                </span>
+              ) : null}
+              {provider.cli_key === "claude" && hasClaudeModels ? (
+                <span
+                  className="shrink-0 rounded-full bg-sky-50 px-2 py-0.5 font-mono text-[10px] text-sky-700 dark:bg-sky-900/30 dark:text-sky-400"
+                  title={[
+                    `已配置 Claude 模型映射（${claudeModelsCount}/5）`,
+                    ...claudeModelMappings,
+                  ].join("\n")}
+                >
+                  模型映射 {claudeModelsCount}/5
+                </span>
+              ) : null}
+              {hasLimits ? (
+                <span
+                  className="shrink-0 rounded-full bg-amber-50 px-2 py-0.5 font-mono text-[10px] text-amber-700 dark:bg-amber-900/30 dark:text-amber-400"
+                  title={limitChips.join("\n")}
+                >
+                  限额
+                </span>
+              ) : null}
+              {visibleTags.map((tag) => (
+                <span key={tag} className={providerTagClassName(tag)} title={`标签: ${tag}`}>
+                  {tag}
+                </span>
+              ))}
+            </div>
+            <div className="mt-1 flex min-w-0 flex-wrap items-center gap-2">
+              {isOAuth ? (
+                <>
+                  {provider.oauth_email ? (
+                    <span
+                      className="truncate font-mono text-xs text-muted-foreground cursor-default"
+                      title={`OAuth: ${provider.oauth_email}`}
+                    >
+                      {provider.oauth_email}
+                    </span>
+                  ) : null}
+                  <OAuthQuotaUsageInline
+                    cliKey={provider.cli_key}
+                    limits={oauthLimits}
+                    nowUnix={nowUnix}
+                    className="contents"
+                    segmentClassName="cursor-default"
+                    resetCreditDisabled={!canResetCredit}
+                    resetCreditLoading={resettingCodexQuota}
+                    onResetCreditClick={
+                      showResetCredit
+                        ? () => {
+                            if (!canResetCredit) return;
+                            setResetConfirmOpen(true);
+                          }
+                        : undefined
+                    }
+                  />
+                  {resetError ? (
+                    <span className="shrink-0 text-xs text-rose-600 dark:text-rose-400">
+                      {resetError}
+                    </span>
+                  ) : null}
+                </>
+              ) : isCx2cc ? (
+                <>
+                  <span
+                    className="truncate font-mono text-xs text-violet-500 dark:text-violet-400 cursor-default"
+                    title={`来源: ${cx2ccSourceName}`}
+                  >
+                    来源: {cx2ccSourceName}
+                  </span>
+                  <span
+                    className="truncate font-mono text-xs text-muted-foreground cursor-default"
+                    title={cx2ccRouteLabel}
+                  >
+                    {cx2ccRouteLabel}
+                  </span>
+                </>
+              ) : apiKeyDetailsVisible ? (
+                <span
+                  className="truncate font-mono text-xs text-muted-foreground cursor-default"
+                  title={provider.base_urls.join("\n")}
+                >
+                  {providerBaseUrlSummary(provider)}
+                </span>
+              ) : null}
+            </div>
+            {provider.note ? (
+              <div
+                className="mt-1 break-words text-xs text-muted-foreground cursor-default"
+                title={provider.note}
+                onPointerDown={(e) => e.stopPropagation()}
+              >
+                <ProviderNote note={provider.note} />
+              </div>
+            ) : null}
+          </div>
+        </div>
+
+        <div
+          className="flex shrink-0 flex-col items-stretch gap-2 sm:flex-row sm:items-stretch sm:justify-end"
+          onPointerDown={(e) => e.stopPropagation()}
+        >
+          <div
+            data-provider-card-management-actions="true"
+            className="flex flex-col items-end gap-2"
+          >
+            <div className="flex flex-wrap items-center justify-end gap-2">
+              {displayState !== "healthy" ? (
+                // 半开态语义：跳过试探直接恢复。
+                <Button
+                  onClick={() => onResetCircuit(provider)}
+                  variant="secondary"
+                  size="md"
+                  className="h-9"
+                  disabled={circuitResetting}
+                >
+                  {circuitResetting ? "处理中…" : "解除熔断"}
+                </Button>
+              ) : null}
+
+              <Button
+                onClick={() => onEdit(provider)}
+                variant="secondary"
+                size="md"
+                className="h-9"
+                title="编辑"
+              >
+                <Pencil className="h-4 w-4" />
+                编辑
+              </Button>
+            </div>
+
+            <div
+              data-provider-card-secondary-actions="true"
+              className="flex flex-wrap items-center justify-end gap-2"
+            >
+              {onCopyTerminalLaunchCommand ? (
+                <Button
+                  onClick={() => onCopyTerminalLaunchCommand(provider)}
+                  variant="secondary"
+                  size="sm"
+                  className="px-2 py-1 text-[11px] gap-1.5"
+                  disabled={terminalLaunchCopying}
+                  title="复制终端启动命令"
+                >
+                  <Terminal className="h-3.5 w-3.5" />
+                  {terminalLaunchCopying ? "复制中…" : "终端启动"}
+                </Button>
+              ) : null}
+
+              {onTestAvailability ? (
+                <Button
+                  onClick={() => onTestAvailability(provider)}
+                  variant="secondary"
+                  size="sm"
+                  className="px-2 py-1 text-[11px] gap-1.5"
+                  disabled={testAvailabilityLoading}
+                  title="测试供应商可用性"
+                >
+                  <Zap className="h-3.5 w-3.5" />
+                  {testAvailabilityLoading ? "测试中…" : "测试"}
+                </Button>
+              ) : null}
+
+              {onDuplicate ? (
+                <Button
+                  onClick={() => onDuplicate(provider)}
+                  variant="secondary"
+                  size="sm"
+                  className="px-2 py-1 text-[11px] gap-1.5"
+                  disabled={duplicateLoading}
+                  title="复制"
+                >
+                  <Copy className="h-3.5 w-3.5" />
+                  {duplicateLoading ? "复制中…" : "复制"}
+                </Button>
+              ) : null}
+
+              <Button
+                onClick={() => onDelete(provider)}
+                variant="danger"
+                size="sm"
+                className="px-2 py-1 text-[11px] gap-1.5"
+                title="删除"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+                删除
+              </Button>
+            </div>
+          </div>
+
+          {trailingContent ? (
+            <div
+              data-provider-card-edge-action="true"
+              className="flex w-16 shrink-0 items-center justify-end border-t border-border pt-2 sm:border-l sm:border-t-0 sm:pl-3 sm:pt-0"
+            >
+              <EdgeAction>{trailingContent}</EdgeAction>
             </div>
           ) : null}
         </div>
-      </div>
-
-      <div className="flex flex-col items-end gap-2" onPointerDown={(e) => e.stopPropagation()}>
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {isUnavailable ? (
-            <Button
-              onClick={() => onResetCircuit(provider)}
-              variant="secondary"
-              size="md"
-              className="h-9"
-              disabled={circuitResetting}
-            >
-              {circuitResetting ? "处理中…" : "解除熔断"}
-            </Button>
-          ) : null}
-
-          <Button
-            onClick={() => onEdit(provider)}
-            variant="secondary"
-            size="md"
-            className="h-9"
-            title="编辑"
-          >
-            <Pencil className="h-4 w-4" />
-            编辑
-          </Button>
-
-          <div className="inline-flex h-9 items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm shadow-sm dark:border-slate-600 dark:bg-slate-800">
-            <span className="text-sm font-medium text-slate-700 dark:text-slate-300">
-              {provider.enabled ? "已启用" : "已关闭"}
-            </span>
-            <Switch checked={provider.enabled} onCheckedChange={() => onToggleEnabled(provider)} />
-          </div>
-        </div>
-
-        <div className="flex flex-wrap items-center justify-end gap-2">
-          {onCopyTerminalLaunchCommand ? (
-            <Button
-              onClick={() => onCopyTerminalLaunchCommand(provider)}
-              variant="secondary"
-              size="sm"
-              className="px-2 py-1 text-[11px] gap-1.5"
-              disabled={terminalLaunchCopying}
-              title="复制终端启动命令"
-            >
-              <Terminal className="h-3.5 w-3.5" />
-              {terminalLaunchCopying ? "复制中…" : "终端启动"}
-            </Button>
-          ) : null}
-
-          {onTestAvailability ? (
-            <Button
-              onClick={() => onTestAvailability(provider)}
-              variant="secondary"
-              size="sm"
-              className="px-2 py-1 text-[11px] gap-1.5"
-              disabled={testAvailabilityLoading}
-              title="测试供应商可用性"
-            >
-              <Zap className="h-3.5 w-3.5" />
-              {testAvailabilityLoading ? "测试中…" : "测试"}
-            </Button>
-          ) : null}
-
-          {onValidateModel ? (
-            <Button
-              onClick={() => onValidateModel(provider)}
-              variant="secondary"
-              size="sm"
-              className="px-2 py-1 text-[11px] gap-1.5"
-              title="模型验证"
-            >
-              <FlaskConical className="h-3.5 w-3.5" />
-              模型验证
-            </Button>
-          ) : null}
-
-          {onDuplicate ? (
-            <Button
-              onClick={() => onDuplicate(provider)}
-              variant="secondary"
-              size="sm"
-              className="px-2 py-1 text-[11px] gap-1.5"
-              disabled={duplicateLoading}
-              title="复制"
-            >
-              <Copy className="h-3.5 w-3.5" />
-              {duplicateLoading ? "复制中…" : "复制"}
-            </Button>
-          ) : null}
-
-          <Button
-            onClick={() => onDelete(provider)}
-            variant="danger"
-            size="sm"
-            className="px-2 py-1 text-[11px] gap-1.5"
-            title="删除"
-          >
-            <Trash2 className="h-3.5 w-3.5" />
-            删除
-          </Button>
-        </div>
-      </div>
-    </Card>
+      </Card>
+      <ConfirmDialog
+        open={resetConfirmOpen}
+        title="确认重置 Codex 额度"
+        description="使用 1 次 Codex 重置次数刷新该账号额度？"
+        onClose={() => {
+          if (resettingCodexQuota) return;
+          setResetConfirmOpen(false);
+        }}
+        onConfirm={() => {
+          void handleConfirmCodexReset();
+        }}
+        confirmLabel="确认重置"
+        confirmingLabel="重置中…"
+        confirming={resettingCodexQuota}
+        disabled={!canResetCredit}
+        confirmVariant="danger"
+      />
+    </>
   );
 });
 
@@ -560,17 +627,14 @@ export const SortableProviderCard = memo(function SortableProviderCard(
     transform: CSS.Transform.toString(transform),
     transition,
   };
+  const dragHandleProps = useMemo(() => ({ ...attributes, ...listeners }), [attributes, listeners]);
 
   return (
-    <div ref={setNodeRef} style={style} className="relative">
+    <div ref={setNodeRef} style={style} className="relative" data-provider-id={props.provider.id}>
       <ProviderCard
         {...props}
-        className={cn(
-          "cursor-grab active:cursor-grabbing",
-          isDragging && "z-10 scale-[1.02] shadow-lg ring-2 ring-accent/30"
-        )}
-        {...attributes}
-        {...listeners}
+        className={cn(isDragging && "z-10 scale-[1.02] shadow-lg ring-2 ring-accent/30")}
+        dragHandleProps={dragHandleProps}
       />
     </div>
   );

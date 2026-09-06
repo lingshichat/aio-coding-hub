@@ -7,6 +7,9 @@ pub(in crate::gateway) enum GatewayErrorCode {
     AllProvidersUnavailable,
     UpstreamAllFailed,
     NoEnabledProvider,
+    ForcedProviderNotEligibleForModel,
+    NoEligibleProviderForModel,
+    ModelPolicyInvalid,
     UpstreamTimeout,
     UpstreamConnectFailed,
     Upstream5xx,
@@ -17,6 +20,8 @@ pub(in crate::gateway) enum GatewayErrorCode {
     StreamAborted,
     StreamIdleTimeout,
     RequestAborted,
+    RequestInterruptedByRestart,
+    RequestInterruptedByGatewayStop,
     InternalError,
     BodyTooLarge,
     LargeBodyMissingModel,
@@ -46,6 +51,9 @@ impl GatewayErrorCode {
             Self::AllProvidersUnavailable => "GW_ALL_PROVIDERS_UNAVAILABLE",
             Self::UpstreamAllFailed => "GW_UPSTREAM_ALL_FAILED",
             Self::NoEnabledProvider => "GW_NO_ENABLED_PROVIDER",
+            Self::ForcedProviderNotEligibleForModel => "GW_FORCED_PROVIDER_NOT_ELIGIBLE_FOR_MODEL",
+            Self::NoEligibleProviderForModel => "GW_NO_ELIGIBLE_PROVIDER_FOR_MODEL",
+            Self::ModelPolicyInvalid => "GW_MODEL_POLICY_INVALID",
             Self::UpstreamTimeout => "GW_UPSTREAM_TIMEOUT",
             Self::UpstreamConnectFailed => "GW_UPSTREAM_CONNECT_FAILED",
             Self::Upstream5xx => "GW_UPSTREAM_5XX",
@@ -56,6 +64,8 @@ impl GatewayErrorCode {
             Self::StreamAborted => "GW_STREAM_ABORTED",
             Self::StreamIdleTimeout => "GW_STREAM_IDLE_TIMEOUT",
             Self::RequestAborted => "GW_REQUEST_ABORTED",
+            Self::RequestInterruptedByRestart => "GW_REQUEST_INTERRUPTED_BY_RESTART",
+            Self::RequestInterruptedByGatewayStop => "GW_REQUEST_INTERRUPTED_BY_GATEWAY_STOP",
             Self::InternalError => "GW_INTERNAL_ERROR",
             Self::BodyTooLarge => "GW_BODY_TOO_LARGE",
             Self::LargeBodyMissingModel => "GW_LARGE_BODY_MISSING_MODEL",
@@ -87,6 +97,9 @@ impl GatewayErrorCode {
             "GW_ALL_PROVIDERS_UNAVAILABLE" => Self::AllProvidersUnavailable,
             "GW_UPSTREAM_ALL_FAILED" => Self::UpstreamAllFailed,
             "GW_NO_ENABLED_PROVIDER" => Self::NoEnabledProvider,
+            "GW_FORCED_PROVIDER_NOT_ELIGIBLE_FOR_MODEL" => Self::ForcedProviderNotEligibleForModel,
+            "GW_NO_ELIGIBLE_PROVIDER_FOR_MODEL" => Self::NoEligibleProviderForModel,
+            "GW_MODEL_POLICY_INVALID" => Self::ModelPolicyInvalid,
             "GW_UPSTREAM_TIMEOUT" => Self::UpstreamTimeout,
             "GW_UPSTREAM_CONNECT_FAILED" => Self::UpstreamConnectFailed,
             "GW_UPSTREAM_5XX" => Self::Upstream5xx,
@@ -97,6 +110,8 @@ impl GatewayErrorCode {
             "GW_STREAM_ABORTED" => Self::StreamAborted,
             "GW_STREAM_IDLE_TIMEOUT" => Self::StreamIdleTimeout,
             "GW_REQUEST_ABORTED" => Self::RequestAborted,
+            "GW_REQUEST_INTERRUPTED_BY_RESTART" => Self::RequestInterruptedByRestart,
+            "GW_REQUEST_INTERRUPTED_BY_GATEWAY_STOP" => Self::RequestInterruptedByGatewayStop,
             "GW_INTERNAL_ERROR" => Self::InternalError,
             "GW_BODY_TOO_LARGE" => Self::BodyTooLarge,
             "GW_LARGE_BODY_MISSING_MODEL" => Self::LargeBodyMissingModel,
@@ -137,6 +152,9 @@ mod tests {
         GatewayErrorCode::AllProvidersUnavailable,
         GatewayErrorCode::UpstreamAllFailed,
         GatewayErrorCode::NoEnabledProvider,
+        GatewayErrorCode::ForcedProviderNotEligibleForModel,
+        GatewayErrorCode::NoEligibleProviderForModel,
+        GatewayErrorCode::ModelPolicyInvalid,
         GatewayErrorCode::UpstreamTimeout,
         GatewayErrorCode::UpstreamConnectFailed,
         GatewayErrorCode::Upstream5xx,
@@ -147,6 +165,8 @@ mod tests {
         GatewayErrorCode::StreamAborted,
         GatewayErrorCode::StreamIdleTimeout,
         GatewayErrorCode::RequestAborted,
+        GatewayErrorCode::RequestInterruptedByRestart,
+        GatewayErrorCode::RequestInterruptedByGatewayStop,
         GatewayErrorCode::InternalError,
         GatewayErrorCode::BodyTooLarge,
         GatewayErrorCode::LargeBodyMissingModel,
@@ -186,6 +206,8 @@ mod tests {
     fn client_abort_flags() {
         assert!(GatewayErrorCode::RequestAborted.is_client_abort());
         assert!(GatewayErrorCode::StreamAborted.is_client_abort());
+        assert!(!GatewayErrorCode::RequestInterruptedByRestart.is_client_abort());
+        assert!(!GatewayErrorCode::RequestInterruptedByGatewayStop.is_client_abort());
         assert!(!GatewayErrorCode::UpstreamTimeout.is_client_abort());
     }
 }

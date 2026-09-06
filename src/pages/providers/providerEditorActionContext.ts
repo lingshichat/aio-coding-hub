@@ -1,7 +1,11 @@
 import type {
   ClaudeModels,
   CliKey,
+  ProviderOAuthDeviceCodeStartResult,
   ProviderOAuthStatusResult,
+  ProviderExtensionValuesInput,
+  ProviderModelPolicyV1,
+  ProviderModelPolicyStatus,
   ProviderUpsertInput,
   ProviderSummary,
 } from "../../services/providers/providers";
@@ -15,7 +19,7 @@ export type ProviderActionContext = {
   editingProviderId: number | null;
   editProvider: ProviderSummary | null;
   open: boolean;
-  onOpenChange: (open: boolean) => void;
+  onOpenChange: (open: boolean, options?: { bypassDirty?: boolean }) => void;
   onSaved: (cliKey: CliKey) => void;
 };
 
@@ -28,8 +32,16 @@ export type AuthActionContext = {
   oauthStatus: OAuthStatusValue;
   setOauthStatus: (v: OAuthStatusValue) => void;
   refreshOauthStatus: (providerId?: number | null) => Promise<OAuthStatusValue>;
+  /** 将 OAuth 状态直接写入 React Query 缓存，保持编辑器快照与本地状态一致。 */
+  writeOauthStatusCache: (status: OAuthStatusValue, providerId?: number | null) => void;
   oauthLoading: boolean;
   setOauthLoading: (v: boolean) => void;
+  oauthDeviceFlow: ProviderOAuthDeviceCodeStartResult | null;
+  setOauthDeviceFlow: (v: ProviderOAuthDeviceCodeStartResult | null) => void;
+  oauthDevicePolling: boolean;
+  setOauthDevicePolling: (v: boolean) => void;
+  oauthDeviceError: string | null;
+  setOauthDeviceError: (v: string | null) => void;
   cx2ccSourceValue: string;
   isCodexGatewaySource: boolean;
   sourceProviderId: number | null;
@@ -73,7 +85,10 @@ export type ProviderEditorPayloadContext = {
   isCodexGatewaySource: boolean;
   sourceProviderId: number | null;
   selectedCx2ccSourceProvider: ProviderSummary | null;
+  modelPolicyStatus: ProviderModelPolicyStatus;
+  modelPolicy: ProviderModelPolicyV1 | null;
   formValues: ProviderEditorDialogFormInput;
+  extensionValues?: ProviderExtensionValuesInput[] | null;
 };
 
 export type ProviderEditorPayloadBuildError =
@@ -109,8 +124,23 @@ export type OAuthActionContext = ProviderActionContext &
   Pick<FormActionContext, "form"> &
   Pick<
     AuthActionContext,
-    "oauthStatus" | "setOauthStatus" | "refreshOauthStatus" | "setOauthLoading"
+    | "oauthStatus"
+    | "setOauthStatus"
+    | "refreshOauthStatus"
+    | "writeOauthStatusCache"
+    | "setOauthLoading"
+    | "oauthDeviceFlow"
+    | "setOauthDeviceFlow"
+    | "oauthDevicePolling"
+    | "setOauthDevicePolling"
+    | "oauthDeviceError"
+    | "setOauthDeviceError"
   > & {
     persistProvider: (input: ProviderUpsertInput) => Promise<ProviderSummary>;
     removeProvider: (providerId: number) => Promise<boolean>;
+    beginOAuthLoginAttempt: () => number;
+    isOAuthLoginAttemptCurrent: (attemptId: number) => boolean;
+    cancelOAuthDeviceFlow: (flowId: string) => void;
+    setActiveOAuthDeviceFlow: (attemptId: number, flowId: string) => void;
+    clearActiveOAuthDeviceFlow: (flowId: string) => void;
   };

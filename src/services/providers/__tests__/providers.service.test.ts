@@ -7,11 +7,16 @@ import {
   providerCopyApiKeyToClipboard,
   providerDelete,
   providerDuplicate,
+  providerOAuthCancelDeviceFlow,
   providerOAuthDisconnect,
   providerOAuthFetchLimits,
+  providerOAuthPollDeviceFlow,
   providerOAuthRefresh,
+  providerOAuthResetCodexQuota,
+  providerOAuthStartDeviceFlow,
   providerOAuthStartFlow,
   providerOAuthStatus,
+  providerModelsDiscover,
   providerSetEnabled,
   providerTestAvailability,
   providersList,
@@ -41,11 +46,16 @@ vi.mock("../../../generated/bindings", async () => {
       providerCopyApiKeyToClipboard: vi.fn(),
       baseUrlPingMs: vi.fn(),
       providerOauthStartFlow: vi.fn(),
+      providerOauthStartDeviceFlow: vi.fn(),
+      providerOauthPollDeviceFlow: vi.fn(),
+      providerOauthCancelDeviceFlow: vi.fn(),
       providerOauthRefresh: vi.fn(),
       providerOauthDisconnect: vi.fn(),
       providerOauthStatus: vi.fn(),
       providerOauthFetchLimits: vi.fn(),
+      providerOauthResetCodexQuota: vi.fn(),
       providerTestAvailability: vi.fn(),
+      providerModelsDiscover: vi.fn(),
     },
   };
 });
@@ -87,13 +97,103 @@ function createProviderSummary(overrides: Partial<ProviderSummary> = {}): Provid
     oauth_last_error: null,
     source_provider_id: null,
     bridge_type: null,
+    model_policy_status: "ready",
+    model_policy: { version: 1, mode: "all", modelPatterns: [], mappings: [] },
     stream_idle_timeout_seconds: null,
+    extension_values: [],
     api_key_configured: false,
     ...overrides,
   };
 }
 
 describe("services/providers/providers", () => {
+  it("passes discovery input and returns the upstream catalog", async () => {
+    vi.mocked(commands.providerModelsDiscover).mockResolvedValueOnce({
+      status: "ok",
+      data: {
+        status: "ready",
+        models: ["gpt-5.4"],
+        origin: "https://example.com",
+        base_url_index: 1,
+      },
+    });
+
+    const input = {
+      providerId: 12,
+      cliKey: "codex" as const,
+      authMode: "api_key" as const,
+      baseUrls: ["https://example.com/v1"],
+      baseUrlMode: "ping" as const,
+      apiKey: "sk-secret",
+      sourceProviderId: null,
+      bridgeType: null,
+    };
+
+    await expect(providerModelsDiscover(input)).resolves.toEqual({
+      status: "ready",
+      models: ["gpt-5.4"],
+      origin: "https://example.com",
+      base_url_index: 1,
+    });
+    expect(commands.providerModelsDiscover).toHaveBeenCalledWith(input);
+  });
+
+  it("preserves discovery HTTP status details", async () => {
+    vi.mocked(commands.providerModelsDiscover).mockResolvedValueOnce({
+      status: "ok",
+      data: {
+        status: "error",
+        code: "invalid_response",
+        http_status: 429,
+      },
+    });
+
+    await expect(
+      providerModelsDiscover({
+        providerId: null,
+        cliKey: "codex",
+        authMode: "api_key",
+        baseUrls: ["https://example.com/v1"],
+        baseUrlMode: "order",
+        apiKey: "sk-secret",
+        sourceProviderId: null,
+        bridgeType: null,
+      })
+    ).resolves.toEqual({
+      status: "error",
+      code: "invalid_response",
+      http_status: 429,
+    });
+  });
+
+  it("redacts discovery API keys when the command fails", async () => {
+    vi.mocked(commands.providerModelsDiscover).mockRejectedValueOnce(new Error("discover failed"));
+
+    await expect(
+      providerModelsDiscover({
+        providerId: null,
+        cliKey: "claude",
+        authMode: "api_key",
+        baseUrls: ["https://example.com"],
+        baseUrlMode: "order",
+        apiKey: "sk-secret",
+        sourceProviderId: null,
+        bridgeType: null,
+      })
+    ).rejects.toThrow("discover failed");
+
+    expect(logToConsole).toHaveBeenCalledWith(
+      "error",
+      "获取上游模型失败",
+      expect.objectContaining({
+        cmd: "provider_models_discover",
+        args: expect.objectContaining({
+          input: expect.objectContaining({ apiKey: "[REDACTED]" }),
+        }),
+      })
+    );
+  });
+
   it("rethrows and logs when invoke fails", async () => {
     vi.mocked(commands.providersList).mockRejectedValueOnce(new Error("providers boom"));
 
@@ -114,7 +214,8 @@ describe("services/providers/providers", () => {
     await expect(providersList("claude")).rejects.toThrow("IPC_NULL_RESULT: providers_list");
   });
 
-  it("builds provider_upsert args as before", async () => {
+  it("builds provider_upsert args without extension values as null", async () => {
+    vi.mocked(commands.providerUpsert).mockClear();
     vi.mocked(commands.providerUpsert).mockResolvedValueOnce({
       status: "ok",
       data: createProviderSummary(),
@@ -148,6 +249,99 @@ describe("services/providers/providers", () => {
         baseUrlMode: "order",
         limit5hUsd: null,
         dailyResetMode: "fixed",
+        modelPolicy: null,
+        extensionValues: null,
+      })
+    );
+  });
+
+  it("passes explicit empty provider extension values in upsert payload", async () => {
+    vi.mocked(commands.providerUpsert).mockClear();
+    vi.mocked(commands.providerUpsert).mockResolvedValueOnce({
+      status: "ok",
+      data: createProviderSummary(),
+    });
+
+    await providerUpsert({
+      providerId: null,
+      cliKey: "claude",
+      name: "P1",
+      baseUrls: ["https://example.com"],
+      baseUrlMode: "order",
+      apiKey: null,
+      enabled: true,
+      costMultiplier: 1,
+      priority: null,
+      claudeModels: null,
+      limit5hUsd: null,
+      limitDailyUsd: null,
+      dailyResetMode: "fixed",
+      dailyResetTime: "00:00:00",
+      limitWeeklyUsd: null,
+      limitMonthlyUsd: null,
+      limitTotalUsd: null,
+      extensionValues: [],
+    });
+
+    expect(commands.providerUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extensionValues: [],
+      })
+    );
+  });
+
+  it("passes provider extension values in upsert payload", async () => {
+    vi.mocked(commands.providerUpsert).mockClear();
+    vi.mocked(commands.providerUpsert).mockResolvedValueOnce({
+      status: "ok",
+      data: createProviderSummary({
+        extension_values: [
+          {
+            pluginId: "plugin.alpha",
+            namespace: "routing",
+            values: { mode: "sticky" },
+            updatedAt: 1,
+          },
+        ],
+      }),
+    });
+
+    await providerUpsert({
+      providerId: null,
+      cliKey: "claude",
+      name: "P1",
+      baseUrls: ["https://example.com"],
+      baseUrlMode: "order",
+      apiKey: null,
+      enabled: true,
+      costMultiplier: 1,
+      priority: null,
+      claudeModels: null,
+      limit5hUsd: null,
+      limitDailyUsd: null,
+      dailyResetMode: "fixed",
+      dailyResetTime: "00:00:00",
+      limitWeeklyUsd: null,
+      limitMonthlyUsd: null,
+      limitTotalUsd: null,
+      extensionValues: [
+        {
+          pluginId: "plugin.alpha",
+          namespace: "routing",
+          values: { mode: "sticky" },
+        },
+      ],
+    });
+
+    expect(commands.providerUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        extensionValues: [
+          {
+            pluginId: "plugin.alpha",
+            namespace: "routing",
+            values: { mode: "sticky" },
+          },
+        ],
       })
     );
   });
@@ -237,10 +431,42 @@ describe("services/providers/providers", () => {
     expect(commands.providersList).toHaveBeenCalledWith("claude");
     expect(commands.baseUrlPingMs).toHaveBeenCalledWith("https://api.example.com");
     expect(commands.providerSetEnabled).toHaveBeenCalledWith(1, true);
-    expect(commands.providerDelete).toHaveBeenCalledWith(1);
+    expect(commands.providerDelete).toHaveBeenCalledWith(1, false);
     expect(commands.providersReorder).toHaveBeenCalledWith("claude", [2, 1]);
     expect(commands.providerClaudeTerminalLaunchCommand).toHaveBeenCalledWith(5);
-    expect(commands.providerTestAvailability).toHaveBeenCalledWith(5);
+    expect(commands.providerTestAvailability).toHaveBeenCalledWith(5, null, null);
+  });
+
+  it("passes trimmed probe overrides to IPC and nulls blank input", async () => {
+    const availability = {
+      status: "ok" as const,
+      data: {
+        ok: true,
+        provider_id: 5,
+        provider_name: "P1",
+        base_url: "https://api.example.com",
+        status: 200,
+        latency_ms: 42,
+        error: null,
+        response_preview: null,
+      } as any,
+    };
+    vi.mocked(commands.providerTestAvailability).mockResolvedValueOnce(availability);
+    await providerTestAvailability(5, { model: "  deepseek-v4-flash  ", prompt: "  你好  " });
+    expect(commands.providerTestAvailability).toHaveBeenCalledWith(5, "deepseek-v4-flash", "你好");
+
+    vi.mocked(commands.providerTestAvailability).mockResolvedValueOnce(availability);
+    await providerTestAvailability(5, { model: "   ", prompt: "" });
+    expect(commands.providerTestAvailability).toHaveBeenLastCalledWith(5, null, null);
+  });
+
+  it("passes the provider usage stats cleanup flag to IPC", async () => {
+    vi.mocked(commands.providerDelete).mockClear();
+    vi.mocked(commands.providerDelete).mockResolvedValue({ status: "ok", data: true });
+
+    await providerDelete(1, { clearUsageStats: true });
+
+    expect(commands.providerDelete).toHaveBeenCalledWith(1, true);
   });
 
   it("normalizes provider cli keys before IPC", async () => {
@@ -269,6 +495,7 @@ describe("services/providers/providers", () => {
     });
 
     expect(validateProviderCliKey(" claude ")).toBe("claude");
+    expect(validateProviderCliKey(" grok ")).toBe("grok");
 
     await providersList(" claude " as never);
     await providerUpsert({
@@ -326,7 +553,11 @@ describe("services/providers/providers", () => {
     vi.mocked(commands.providerDelete).mockClear();
     vi.mocked(commands.providerDuplicate).mockClear();
     vi.mocked(commands.providerOauthStartFlow).mockClear();
+    vi.mocked(commands.providerOauthStartDeviceFlow).mockClear();
+    vi.mocked(commands.providerOauthPollDeviceFlow).mockClear();
+    vi.mocked(commands.providerOauthCancelDeviceFlow).mockClear();
     vi.mocked(commands.providerOauthRefresh).mockClear();
+    vi.mocked(commands.providerOauthResetCodexQuota).mockClear();
     vi.mocked(commands.providerOauthDisconnect).mockClear();
     vi.mocked(commands.providerOauthStatus).mockClear();
     vi.mocked(commands.providerOauthFetchLimits).mockClear();
@@ -383,7 +614,12 @@ describe("services/providers/providers", () => {
     await expect(providerDelete(0)).rejects.toThrow("SEC_INVALID_INPUT");
     await expect(providerDuplicate(1.5)).rejects.toThrow("SEC_INVALID_INPUT");
     await expect(providerOAuthStartFlow("not-a-cli", 1)).rejects.toThrow("SEC_INVALID_INPUT");
+    await expect(providerOAuthStartDeviceFlow(0)).rejects.toThrow("SEC_INVALID_INPUT");
+    await expect(providerOAuthPollDeviceFlow(1, "", "device", "user")).rejects.toThrow(
+      "SEC_INVALID_INPUT"
+    );
     await expect(providerOAuthRefresh(0)).rejects.toThrow("SEC_INVALID_INPUT");
+    await expect(providerOAuthResetCodexQuota(0)).rejects.toThrow("SEC_INVALID_INPUT");
     await expect(providerOAuthDisconnect(0)).rejects.toThrow("SEC_INVALID_INPUT");
     await expect(providerOAuthStatus(0)).rejects.toThrow("SEC_INVALID_INPUT");
     await expect(providerOAuthFetchLimits(0)).rejects.toThrow("SEC_INVALID_INPUT");
@@ -394,7 +630,10 @@ describe("services/providers/providers", () => {
     expect(commands.providerDelete).not.toHaveBeenCalled();
     expect(commands.providerDuplicate).not.toHaveBeenCalled();
     expect(commands.providerOauthStartFlow).not.toHaveBeenCalled();
+    expect(commands.providerOauthStartDeviceFlow).not.toHaveBeenCalled();
+    expect(commands.providerOauthPollDeviceFlow).not.toHaveBeenCalled();
     expect(commands.providerOauthRefresh).not.toHaveBeenCalled();
+    expect(commands.providerOauthResetCodexQuota).not.toHaveBeenCalled();
     expect(commands.providerOauthDisconnect).not.toHaveBeenCalled();
     expect(commands.providerOauthStatus).not.toHaveBeenCalled();
     expect(commands.providerOauthFetchLimits).not.toHaveBeenCalled();
@@ -450,6 +689,72 @@ describe("services/providers/providers", () => {
     expect(commands.providerOauthStartFlow).toHaveBeenCalledWith("claude", 10);
   });
 
+  it("providerOAuthStartDeviceFlow uses generated ipc", async () => {
+    vi.mocked(commands.providerOauthStartDeviceFlow).mockResolvedValueOnce({
+      status: "ok",
+      data: {
+        provider_id: 10,
+        provider_type: "codex_oauth",
+        flow_id: "flow_123",
+        device_code: "device_123",
+        user_code: "ABCD-EFGH",
+        verification_uri: "https://auth.openai.com/codex/device",
+        expires_in: 900,
+        interval: 5,
+      } as any,
+    });
+
+    const result = await providerOAuthStartDeviceFlow(10);
+    expect(result).toEqual({
+      provider_id: 10,
+      provider_type: "codex_oauth",
+      flow_id: "flow_123",
+      device_code: "device_123",
+      user_code: "ABCD-EFGH",
+      verification_uri: "https://auth.openai.com/codex/device",
+      expires_in: 900,
+      interval: 5,
+    });
+    expect(commands.providerOauthStartDeviceFlow).toHaveBeenCalledWith(10);
+  });
+
+  it("providerOAuthPollDeviceFlow uses generated ipc input", async () => {
+    vi.mocked(commands.providerOauthPollDeviceFlow).mockResolvedValueOnce({
+      status: "ok",
+      data: {
+        completed: true,
+        provider_id: 10,
+        provider_type: "codex_oauth",
+        expires_at: 1700000000,
+      } as any,
+    });
+
+    const result = await providerOAuthPollDeviceFlow(10, " flow_123 ", "device_123", "ABCD-EFGH");
+    expect(result).toEqual({
+      completed: true,
+      provider_id: 10,
+      provider_type: "codex_oauth",
+      expires_at: 1700000000,
+    });
+    expect(commands.providerOauthPollDeviceFlow).toHaveBeenCalledWith({
+      providerId: 10,
+      flowId: "flow_123",
+      deviceCode: "device_123",
+      userCode: "ABCD-EFGH",
+    });
+  });
+
+  it("providerOAuthCancelDeviceFlow uses generated ipc", async () => {
+    vi.mocked(commands.providerOauthCancelDeviceFlow).mockResolvedValueOnce({
+      status: "ok",
+      data: { cancelled: true } as any,
+    });
+
+    const result = await providerOAuthCancelDeviceFlow(" flow_123 ");
+    expect(result).toEqual({ cancelled: true });
+    expect(commands.providerOauthCancelDeviceFlow).toHaveBeenCalledWith("flow_123");
+  });
+
   it("providerOAuthRefresh uses generated ipc", async () => {
     vi.mocked(commands.providerOauthRefresh).mockResolvedValueOnce({
       status: "ok",
@@ -502,6 +807,9 @@ describe("services/providers/providers", () => {
         limit_short_label: "1h",
         limit_5h_text: "100 requests",
         limit_weekly_text: "1000 requests",
+        limit_5h_reset_at: null,
+        limit_weekly_reset_at: null,
+        reset_credit_available_count: 3,
       } as any,
     });
 
@@ -510,7 +818,57 @@ describe("services/providers/providers", () => {
       limit_short_label: "1h",
       limit_5h_text: "100 requests",
       limit_weekly_text: "1000 requests",
+      limit_5h_reset_at: null,
+      limit_weekly_reset_at: null,
+      reset_credit_available_count: 3,
     });
     expect(commands.providerOauthFetchLimits).toHaveBeenCalledWith(50);
+  });
+
+  it("providerOAuthResetCodexQuota uses risky confirm resource scoped to provider", async () => {
+    vi.mocked(commands.providerOauthResetCodexQuota).mockResolvedValueOnce({
+      status: "ok",
+      data: {
+        success: true,
+        code: "ok",
+        windows_reset: 2,
+        refreshed_limits: {
+          limit_short_label: "5h",
+          limit_5h_text: "0%",
+          limit_weekly_text: "50%",
+          limit_5h_reset_at: 1_700_000_000,
+          limit_weekly_reset_at: 1_700_100_000,
+          reset_credit_available_count: 2,
+        },
+        refresh_error: null,
+      } as any,
+    });
+
+    const result = await providerOAuthResetCodexQuota(51);
+
+    expect(result).toEqual({
+      success: true,
+      code: "ok",
+      windows_reset: 2,
+      refreshed_limits: {
+        limit_short_label: "5h",
+        limit_5h_text: "0%",
+        limit_weekly_text: "50%",
+        limit_5h_reset_at: 1_700_000_000,
+        limit_weekly_reset_at: 1_700_100_000,
+        reset_credit_available_count: 2,
+      },
+      refresh_error: null,
+    });
+    expect(commands.providerOauthResetCodexQuota).toHaveBeenCalledWith(
+      51,
+      expect.objectContaining({
+        confirm: expect.objectContaining({
+          action: "provider_oauth_reset_codex_quota",
+          resource: "provider:51:codex_reset_credit",
+          nonce: expect.any(String),
+        }),
+      })
+    );
   });
 });

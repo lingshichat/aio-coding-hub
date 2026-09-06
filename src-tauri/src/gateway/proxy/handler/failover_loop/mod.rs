@@ -28,6 +28,8 @@ mod codex_service_tier;
 mod codex_session_id_completion;
 #[path = "prepare/cx2cc_preparation.rs"]
 mod cx2cc_preparation;
+#[path = "prepare/grok_chat_usage.rs"]
+mod grok_chat_usage;
 #[path = "prepare/oauth.rs"]
 mod oauth;
 #[path = "prepare/provider_checks.rs"]
@@ -38,6 +40,8 @@ mod provider_gate;
 mod provider_iterator;
 #[path = "prepare/provider_limits.rs"]
 mod provider_limits;
+#[path = "prepare/provider_model_policy.rs"]
+mod provider_model_policy;
 #[path = "prepare/request_sanitizer.rs"]
 mod request_sanitizer;
 
@@ -48,6 +52,8 @@ mod attempt_auth;
 mod attempt_executor;
 #[path = "attempt/attempt_record.rs"]
 mod attempt_record;
+#[path = "attempt/reasoning_effort.rs"]
+mod reasoning_effort;
 #[path = "attempt/retry_engine.rs"]
 mod retry_engine;
 #[path = "attempt/send.rs"]
@@ -105,7 +111,7 @@ use crate::gateway::proxy::{
         build_response, has_gzip_content_encoding, has_non_identity_content_encoding,
         is_event_stream, maybe_gunzip_response_body_bytes_with_limit,
     },
-    mark_internal_forwarded_request, ErrorCategory, GatewayErrorCode,
+    ErrorCategory, GatewayErrorCode,
 };
 
 use crate::usage;
@@ -118,13 +124,13 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use crate::gateway::events::{
-    decision_chain as dc, emit_attempt_event, emit_gateway_debug_log_lazy, emit_gateway_log,
-    FailoverAttempt, GatewayAttemptEvent,
+    bound_attempt_event, decision_chain as dc, emit_attempt_event, emit_gateway_debug_log_lazy,
+    emit_gateway_log, FailoverAttempt, GatewayAttemptEvent,
 };
 use crate::gateway::response_fixer;
 use crate::gateway::streams::{
-    spawn_usage_sse_relay_body, FirstChunkStream, GunzipStream, TimingOnlyTeeStream,
-    UsageBodyBufferTeeStream, UsageSseTeeStream,
+    spawn_usage_sse_relay_body, FirstChunkStream, GunzipStream, MaybePluginChunkStream,
+    TimingOnlyTeeStream, UsageBodyBufferTeeStream, UsageSseTeeStream,
 };
 use crate::gateway::thinking_signature_rectifier;
 use crate::gateway::util::{
@@ -186,6 +192,7 @@ where
         cx2cc_settings: &input.cx2cc_settings,
         effective_sort_mode_id: input.effective_sort_mode_id,
         special_settings: &input.special_settings,
+        provider_health_neutral: input.provider_health_neutral,
         provider_cooldown_secs: input.provider_cooldown_secs,
         upstream_first_byte_timeout_secs: input.upstream_first_byte_timeout_secs,
         upstream_first_byte_timeout: input.upstream_first_byte_timeout,
@@ -193,6 +200,7 @@ where
         upstream_request_timeout_non_streaming: input.upstream_request_timeout_non_streaming,
         verbose_provider_error: input.verbose_provider_error,
         max_attempts_per_provider: input.max_attempts_per_provider,
+        codex_priority_billing_source: input.codex_priority_billing_source,
         enable_response_fixer: input.enable_response_fixer,
         response_fixer_stream_config: input.response_fixer_stream_config,
         response_fixer_non_stream_config: input.response_fixer_non_stream_config,

@@ -49,14 +49,20 @@ pub(crate) struct SettingsUpdate {
     pub tray_enabled: Option<bool>,
     pub enable_cli_proxy_startup_recovery: Option<bool>,
     pub log_retention_days: u32,
+    // Option keeps older frontend payloads valid (0 = keep forever).
+    pub request_log_retention_days: Option<u32>,
     pub provider_cooldown_seconds: Option<u32>,
     pub provider_base_url_ping_cache_ttl_seconds: Option<u32>,
     pub upstream_first_byte_timeout_seconds: Option<u32>,
     pub upstream_stream_idle_timeout_seconds: Option<u32>,
     pub upstream_request_timeout_non_streaming_seconds: Option<u32>,
     pub intercept_anthropic_warmup_requests: Option<bool>,
+    pub enable_thinking_effort_conflict_rectifier: Option<bool>,
     pub enable_thinking_signature_rectifier: Option<bool>,
     pub enable_thinking_budget_rectifier: Option<bool>,
+    pub enable_gemini_function_id_rectifier: Option<bool>,
+    pub enable_response_input_rectifier: Option<bool>,
+    pub codex_priority_billing_source: Option<settings::CodexPriorityBillingSource>,
     pub enable_billing_header_rectifier: Option<bool>,
     pub enable_claude_metadata_user_id_injection: Option<bool>,
     pub enable_cache_anomaly_monitor: Option<bool>,
@@ -80,6 +86,7 @@ pub(crate) struct SettingsUpdate {
     pub wsl_custom_host_address: Option<String>,
     pub codex_home_mode: Option<settings::CodexHomeMode>,
     pub codex_home_override: Option<String>,
+    pub codex_oauth_compatible_proxy_mode: Option<bool>,
     #[serde(rename = "cx2CcFallbackModelOpus")]
     #[specta(rename = "cx2CcFallbackModelOpus")]
     pub cx2cc_fallback_model_opus: Option<String>,
@@ -143,11 +150,13 @@ pub(crate) struct SettingsView {
     pub wsl_custom_host_address: String,
     pub codex_home_mode: settings::CodexHomeMode,
     pub codex_home_override: String,
+    pub codex_oauth_compatible_proxy_mode: bool,
     pub auto_start: bool,
     pub start_minimized: bool,
     pub tray_enabled: bool,
     pub enable_cli_proxy_startup_recovery: bool,
     pub log_retention_days: u32,
+    pub request_log_retention_days: u32,
     pub provider_cooldown_seconds: u32,
     pub provider_base_url_ping_cache_ttl_seconds: u32,
     pub upstream_first_byte_timeout_seconds: u32,
@@ -161,8 +170,12 @@ pub(crate) struct SettingsView {
     pub enable_circuit_breaker_notice: bool,
     pub verbose_provider_error: bool,
     pub intercept_anthropic_warmup_requests: bool,
+    pub enable_thinking_effort_conflict_rectifier: bool,
     pub enable_thinking_signature_rectifier: bool,
     pub enable_thinking_budget_rectifier: bool,
+    pub enable_gemini_function_id_rectifier: bool,
+    pub enable_response_input_rectifier: bool,
+    pub codex_priority_billing_source: settings::CodexPriorityBillingSource,
     pub enable_billing_header_rectifier: bool,
     pub enable_codex_session_id_completion: bool,
     pub enable_claude_metadata_user_id_injection: bool,
@@ -212,8 +225,12 @@ pub(crate) struct SettingsMutationResult {
 pub(crate) struct GatewayRectifierSettingsUpdate {
     pub verbose_provider_error: bool,
     pub intercept_anthropic_warmup_requests: bool,
+    pub enable_thinking_effort_conflict_rectifier: bool,
     pub enable_thinking_signature_rectifier: bool,
     pub enable_thinking_budget_rectifier: bool,
+    pub enable_gemini_function_id_rectifier: bool,
+    pub enable_response_input_rectifier: bool,
+    pub codex_priority_billing_source: settings::CodexPriorityBillingSource,
     pub enable_billing_header_rectifier: bool,
     pub enable_claude_metadata_user_id_injection: bool,
     pub enable_response_fixer: bool,
@@ -261,11 +278,13 @@ impl From<&settings::AppSettings> for SettingsView {
             wsl_custom_host_address: value.wsl_custom_host_address.clone(),
             codex_home_mode: value.codex_home_mode,
             codex_home_override: value.codex_home_override.clone(),
+            codex_oauth_compatible_proxy_mode: value.codex_oauth_compatible_proxy_mode,
             auto_start: value.auto_start,
             start_minimized: value.start_minimized,
             tray_enabled: value.tray_enabled,
             enable_cli_proxy_startup_recovery: value.enable_cli_proxy_startup_recovery,
             log_retention_days: value.log_retention_days,
+            request_log_retention_days: value.request_log_retention_days,
             provider_cooldown_seconds: value.provider_cooldown_seconds,
             provider_base_url_ping_cache_ttl_seconds: value
                 .provider_base_url_ping_cache_ttl_seconds,
@@ -281,8 +300,13 @@ impl From<&settings::AppSettings> for SettingsView {
             enable_circuit_breaker_notice: value.enable_circuit_breaker_notice,
             verbose_provider_error: value.verbose_provider_error,
             intercept_anthropic_warmup_requests: value.intercept_anthropic_warmup_requests,
+            enable_thinking_effort_conflict_rectifier: value
+                .enable_thinking_effort_conflict_rectifier,
             enable_thinking_signature_rectifier: value.enable_thinking_signature_rectifier,
             enable_thinking_budget_rectifier: value.enable_thinking_budget_rectifier,
+            enable_gemini_function_id_rectifier: value.enable_gemini_function_id_rectifier,
+            enable_response_input_rectifier: value.enable_response_input_rectifier,
+            codex_priority_billing_source: value.codex_priority_billing_source,
             enable_billing_header_rectifier: value.enable_billing_header_rectifier,
             enable_codex_session_id_completion: value.enable_codex_session_id_completion,
             enable_claude_metadata_user_id_injection: value
@@ -321,7 +345,10 @@ impl SettingsRuntimePlan {
         let gateway_rebind_required = crate::gateway::listen_rebind_required(previous, next);
         let codex_home_changed = previous.codex_home_mode != next.codex_home_mode
             || previous.codex_home_override != next.codex_home_override;
-        let cli_proxy_sync_required = gateway_rebind_required || codex_home_changed;
+        let codex_proxy_mode_changed =
+            previous.codex_oauth_compatible_proxy_mode != next.codex_oauth_compatible_proxy_mode;
+        let cli_proxy_sync_required =
+            gateway_rebind_required || codex_home_changed || codex_proxy_mode_changed;
         #[cfg(windows)]
         let wsl_auto_sync_required = next.wsl_auto_config
             && next.gateway_listen_mode != settings::GatewayListenMode::Localhost
@@ -539,14 +566,19 @@ pub(crate) async fn settings_set_impl(
         tray_enabled,
         enable_cli_proxy_startup_recovery,
         log_retention_days,
+        request_log_retention_days,
         provider_cooldown_seconds,
         provider_base_url_ping_cache_ttl_seconds,
         upstream_first_byte_timeout_seconds,
         upstream_stream_idle_timeout_seconds,
         upstream_request_timeout_non_streaming_seconds,
         intercept_anthropic_warmup_requests,
+        enable_thinking_effort_conflict_rectifier,
         enable_thinking_signature_rectifier,
         enable_thinking_budget_rectifier,
+        enable_gemini_function_id_rectifier,
+        enable_response_input_rectifier,
+        codex_priority_billing_source,
         enable_billing_header_rectifier,
         enable_claude_metadata_user_id_injection,
         enable_cache_anomaly_monitor,
@@ -570,6 +602,7 @@ pub(crate) async fn settings_set_impl(
         wsl_custom_host_address,
         codex_home_mode,
         codex_home_override,
+        codex_oauth_compatible_proxy_mode,
         cx2cc_fallback_model_opus,
         cx2cc_fallback_model_sonnet,
         cx2cc_fallback_model_haiku,
@@ -603,6 +636,8 @@ pub(crate) async fn settings_set_impl(
             let start_minimized = start_minimized.unwrap_or(previous.start_minimized);
             let enable_cli_proxy_startup_recovery = enable_cli_proxy_startup_recovery
                 .unwrap_or(previous.enable_cli_proxy_startup_recovery);
+            let request_log_retention_days =
+                request_log_retention_days.unwrap_or(previous.request_log_retention_days);
             let provider_cooldown_seconds =
                 provider_cooldown_seconds.unwrap_or(previous.provider_cooldown_seconds);
             let gateway_listen_mode = gateway_listen_mode.unwrap_or(previous.gateway_listen_mode);
@@ -628,6 +663,8 @@ pub(crate) async fn settings_set_impl(
                 .unwrap_or(previous.codex_home_override.clone())
                 .trim()
                 .to_string();
+            let codex_oauth_compatible_proxy_mode = codex_oauth_compatible_proxy_mode
+                .unwrap_or(previous.codex_oauth_compatible_proxy_mode);
             let cx2cc_fallback_model_opus = cx2cc_fallback_model_opus
                 .unwrap_or(previous.cx2cc_fallback_model_opus.clone())
                 .trim()
@@ -697,10 +734,19 @@ pub(crate) async fn settings_set_impl(
                     .unwrap_or(previous.upstream_request_timeout_non_streaming_seconds);
             let intercept_anthropic_warmup_requests = intercept_anthropic_warmup_requests
                 .unwrap_or(previous.intercept_anthropic_warmup_requests);
+            let enable_thinking_effort_conflict_rectifier =
+                enable_thinking_effort_conflict_rectifier
+                    .unwrap_or(previous.enable_thinking_effort_conflict_rectifier);
             let enable_thinking_signature_rectifier = enable_thinking_signature_rectifier
                 .unwrap_or(previous.enable_thinking_signature_rectifier);
             let enable_thinking_budget_rectifier = enable_thinking_budget_rectifier
                 .unwrap_or(previous.enable_thinking_budget_rectifier);
+            let enable_gemini_function_id_rectifier = enable_gemini_function_id_rectifier
+                .unwrap_or(previous.enable_gemini_function_id_rectifier);
+            let enable_response_input_rectifier = enable_response_input_rectifier
+                .unwrap_or(previous.enable_response_input_rectifier);
+            let codex_priority_billing_source = codex_priority_billing_source
+                .unwrap_or(previous.codex_priority_billing_source);
             let enable_billing_header_rectifier =
                 enable_billing_header_rectifier.unwrap_or(previous.enable_billing_header_rectifier);
             let enable_claude_metadata_user_id_injection = enable_claude_metadata_user_id_injection
@@ -749,11 +795,15 @@ pub(crate) async fn settings_set_impl(
                 wsl_custom_host_address,
                 codex_home_mode,
                 codex_home_override,
+                codex_oauth_compatible_proxy_mode,
+                grok_proxy_preferences: previous.grok_proxy_preferences.clone(),
+                image_gen_storage_dir: previous.image_gen_storage_dir.clone(),
                 auto_start: next_auto_start,
                 start_minimized,
                 tray_enabled,
                 enable_cli_proxy_startup_recovery,
                 log_retention_days,
+                request_log_retention_days,
                 provider_cooldown_seconds,
                 provider_base_url_ping_cache_ttl_seconds,
                 upstream_first_byte_timeout_seconds,
@@ -767,8 +817,12 @@ pub(crate) async fn settings_set_impl(
                 enable_circuit_breaker_notice: previous.enable_circuit_breaker_notice,
                 verbose_provider_error,
                 intercept_anthropic_warmup_requests,
+                enable_thinking_effort_conflict_rectifier,
                 enable_thinking_signature_rectifier,
                 enable_thinking_budget_rectifier,
+                enable_gemini_function_id_rectifier,
+                enable_response_input_rectifier,
+                codex_priority_billing_source,
                 enable_billing_header_rectifier,
                 enable_codex_session_id_completion: previous.enable_codex_session_id_completion,
                 enable_claude_metadata_user_id_injection,
@@ -945,9 +999,15 @@ pub(crate) async fn settings_gateway_rectifier_set(
             settings.verbose_provider_error = update.verbose_provider_error;
             settings.intercept_anthropic_warmup_requests =
                 update.intercept_anthropic_warmup_requests;
+            settings.enable_thinking_effort_conflict_rectifier =
+                update.enable_thinking_effort_conflict_rectifier;
             settings.enable_thinking_signature_rectifier =
                 update.enable_thinking_signature_rectifier;
             settings.enable_thinking_budget_rectifier = update.enable_thinking_budget_rectifier;
+            settings.enable_gemini_function_id_rectifier =
+                update.enable_gemini_function_id_rectifier;
+            settings.enable_response_input_rectifier = update.enable_response_input_rectifier;
+            settings.codex_priority_billing_source = update.codex_priority_billing_source;
             settings.enable_billing_header_rectifier = update.enable_billing_header_rectifier;
             settings.enable_claude_metadata_user_id_injection =
                 update.enable_claude_metadata_user_id_injection;
@@ -967,8 +1027,13 @@ pub(crate) async fn settings_gateway_rectifier_set(
         tracing::info!(
             verbose_provider_error = settings.verbose_provider_error,
             intercept_anthropic_warmup_requests = settings.intercept_anthropic_warmup_requests,
+            enable_thinking_effort_conflict_rectifier =
+                settings.enable_thinking_effort_conflict_rectifier,
             enable_thinking_signature_rectifier = settings.enable_thinking_signature_rectifier,
             enable_thinking_budget_rectifier = settings.enable_thinking_budget_rectifier,
+            enable_gemini_function_id_rectifier = settings.enable_gemini_function_id_rectifier,
+            enable_response_input_rectifier = settings.enable_response_input_rectifier,
+            codex_priority_billing_source = ?settings.codex_priority_billing_source,
             enable_billing_header_rectifier = settings.enable_billing_header_rectifier,
             enable_claude_metadata_user_id_injection =
                 settings.enable_claude_metadata_user_id_injection,

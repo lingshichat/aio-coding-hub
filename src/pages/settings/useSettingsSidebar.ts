@@ -8,15 +8,15 @@ import {
   useDbDiskUsageQuery,
   useRequestLogsClearAllMutation,
 } from "../../query/dataManagement";
-import {
-  useModelPricesSyncBasellmMutation,
-  useModelPricesTotalCountQuery,
-} from "../../query/modelPrices";
+import { useModelPricesSyncMutation } from "../../query/modelPrices";
 import { useUsageSummaryQuery } from "../../query/usage";
 import { resolveAvailableStatus } from "./settingsSidebarModel";
 import { useSettingsSidebarController } from "./useSettingsSidebarController";
 
-export function useSettingsSidebar(updateMeta: UpdateMeta) {
+export function useSettingsSidebar(
+  updateMeta: UpdateMeta,
+  requestLogRetentionDays: number | null = null
+) {
   const about = updateMeta.about;
   const devPreview = useDevPreviewData();
   const queryClient = useQueryClient();
@@ -25,8 +25,7 @@ export function useSettingsSidebar(updateMeta: UpdateMeta) {
     [queryClient]
   );
 
-  const modelPricesCountQuery = useModelPricesTotalCountQuery();
-  const modelPricesSyncMutation = useModelPricesSyncBasellmMutation();
+  const modelPricesSyncMutation = useModelPricesSyncMutation();
   const configExportMutation = useConfigExportMutation();
   const configImportMutation = useConfigImportMutation();
   const todaySummaryQuery = useUsageSummaryQuery("today", { cliKey: null });
@@ -56,7 +55,6 @@ export function useSettingsSidebar(updateMeta: UpdateMeta) {
     },
   });
 
-  const modelPricesCount = modelPricesCountQuery.data ?? null;
   const todayRequestsTotal = todaySummaryQuery.data?.requests_total ?? null;
   const dbDiskUsage = dbDiskUsageQuery.data ?? null;
 
@@ -70,8 +68,11 @@ export function useSettingsSidebar(updateMeta: UpdateMeta) {
       about,
       dbDiskUsageAvailable: resolveAvailableStatus(dbDiskUsage, dbDiskUsageQuery.isLoading),
       dbDiskUsage,
+      requestLogRetentionDays,
       refreshDbDiskUsage: controller.refreshDbDiskUsage,
       openAppDataDir: controller.openAppDataDir,
+      onCompactDb: controller.compactDb,
+      compactingDb: controller.compactingDb,
       openClearRequestLogsDialog: controller.openClearRequestLogsDialog,
       openResetAllDialog: controller.openResetAllDialog,
       onExportConfig: controller.exportConfig,
@@ -80,11 +81,6 @@ export function useSettingsSidebar(updateMeta: UpdateMeta) {
     },
     dataSyncCardProps: {
       about,
-      modelPricesAvailable: resolveAvailableStatus(
-        modelPricesCount,
-        modelPricesCountQuery.isLoading
-      ),
-      modelPricesCount,
       lastModelPricesSyncError: controller.lastModelPricesSyncError,
       lastModelPricesSyncReport: controller.lastModelPricesSyncReport,
       lastModelPricesSyncTime: controller.lastModelPricesSyncTime,

@@ -52,6 +52,7 @@ where
         gemini_oauth_response_mode,
         cx2cc_active,
         anthropic_stream_requested: _,
+        ..
     } = attempt_ctx;
     let selection_method = dc::selection_method(provider_index, retry_index, session_reuse);
     let reason_code = dc::success_reason_code(provider_index, retry_index);
@@ -154,6 +155,7 @@ where
                     decision,
                     outcome,
                     reason: format!("first chunk read error (event-stream): {err}"),
+                    timeout_secs: Some(upstream_first_byte_timeout_secs),
                 })
                 .await;
             }
@@ -185,16 +187,22 @@ where
                     decision,
                     outcome,
                     reason: "first byte timeout (event-stream)".to_string(),
+                    timeout_secs: Some(upstream_first_byte_timeout_secs),
                 })
                 .await;
             }
             FirstChunkProbe::Skipped => {}
         }
 
+        let fake_200_profile = crate::gateway::proxy::Fake200Profile::for_request(
+            common.cli_key.as_str(),
+            common.forwarded_path.as_str(),
+        );
         if upstream_first_byte_timeout.is_some()
             && first_chunk.is_none()
             && initial_first_byte_ms.is_none()
             && probe_is_empty_event_stream
+            && !fake_200_profile.detects_empty_stream()
         {
             let error_code = GatewayErrorCode::StreamError.as_str();
             let decision = if retry_index < max_attempts_per_provider {
@@ -227,6 +235,7 @@ where
                 decision,
                 outcome,
                 reason: "upstream returned empty event-stream".to_string(),
+                timeout_secs: Some(upstream_first_byte_timeout_secs),
             })
             .await;
         }
@@ -254,6 +263,14 @@ where
             circuit_state_after: None,
             circuit_failure_count: Some(circuit_before.failure_count),
             circuit_failure_threshold: Some(circuit_before.failure_threshold),
+            circuit_recover_at_unix: None,
+            circuit_trigger_error_code: None,
+            provider_bridged: Some(provider_ctx_owned.provider_bridged),
+            timeout_secs: None,
+            reasoning_effort: attempt_ctx.reasoning_effort.map(str::to_string),
+            upstream_sent: attempt_ctx.upstream_sent,
+            claude_model_mapping: provider_ctx_owned.claude_model_mapping.clone(),
+            model_redirect: provider_ctx_owned.model_redirect.clone(),
         });
 
         emit_attempt_event_and_log_with_circuit_before(
@@ -267,6 +284,7 @@ where
 
         codex_service_tier::append_result_if_detected(
             common.cli_key.as_str(),
+            common.codex_priority_billing_source,
             common.introspection_body.as_slice(),
             None,
             &common.special_settings,
@@ -304,6 +322,9 @@ where
                 common.forwarded_path.trim_end_matches('/'),
                 "/v1/responses" | "/responses"
             );
+        let plugin_pipeline = common.state.plugin_pipeline.clone();
+        let plugin_db = common.state.db.clone();
+        let trace_id = common.trace_id.clone();
 
         let body = match (enable_response_fixer_for_this_response, should_gunzip) {
             (true, true) => {
@@ -321,6 +342,12 @@ where
                     upstream,
                     response_fixer_stream_config,
                     common.special_settings.clone(),
+                );
+                let upstream = MaybePluginChunkStream::new(
+                    upstream,
+                    plugin_pipeline.clone(),
+                    plugin_db.clone(),
+                    trace_id.clone(),
                 );
                 if use_sse_relay {
                     spawn_usage_sse_relay_body(
@@ -354,6 +381,12 @@ where
                     response_fixer_stream_config,
                     common.special_settings.clone(),
                 );
+                let upstream = MaybePluginChunkStream::new(
+                    upstream,
+                    plugin_pipeline.clone(),
+                    plugin_db.clone(),
+                    trace_id.clone(),
+                );
                 if use_sse_relay {
                     spawn_usage_sse_relay_body(
                         upstream,
@@ -382,6 +415,12 @@ where
                     common.requested_model.clone(),
                     common.cx2cc_settings.clone(),
                 );
+                let upstream = MaybePluginChunkStream::new(
+                    upstream,
+                    plugin_pipeline.clone(),
+                    plugin_db.clone(),
+                    trace_id.clone(),
+                );
                 if use_sse_relay {
                     spawn_usage_sse_relay_body(
                         upstream,
@@ -408,6 +447,12 @@ where
                     cx2cc_active,
                     common.requested_model.clone(),
                     common.cx2cc_settings.clone(),
+                );
+                let upstream = MaybePluginChunkStream::new(
+                    upstream,
+                    plugin_pipeline.clone(),
+                    plugin_db.clone(),
+                    trace_id.clone(),
                 );
                 if use_sse_relay {
                     spawn_usage_sse_relay_body(

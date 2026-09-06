@@ -221,8 +221,11 @@ pub fn skills_swap_local_for_workspace_switch<R: tauri::Runtime>(
     from_workspace_id: Option<i64>,
     to_workspace_id: i64,
 ) -> crate::shared::error::AppResult<()> {
+    let db = crate::infra::db::init(app)?;
+    let conn = db.open_connection()?;
     let _ = crate::domain::skills::swap_local_skills_for_workspace_switch(
         app,
+        &conn,
         cli_key,
         from_workspace_id,
         to_workspace_id,
@@ -301,6 +304,7 @@ pub fn provider_upsert_json<R: tauri::Runtime>(
             cost_multiplier,
             priority,
             claude_models,
+            model_policy: None,
             limit_5h_usd,
             limit_daily_usd,
             daily_reset_mode: parse_daily_reset_mode(daily_reset_mode)?,
@@ -313,6 +317,7 @@ pub fn provider_upsert_json<R: tauri::Runtime>(
             source_provider_id: None,
             bridge_type: None,
             stream_idle_timeout_seconds: None,
+            extension_values: None,
         },
     )?;
     serialize_json(provider)
@@ -333,7 +338,7 @@ pub fn provider_delete<R: tauri::Runtime>(
     provider_id: i64,
 ) -> crate::shared::error::AppResult<bool> {
     let db = crate::infra::db::init(app)?;
-    crate::providers::delete(&db, provider_id)?;
+    crate::providers::delete(&db, provider_id, false)?;
     Ok(true)
 }
 
@@ -666,6 +671,27 @@ pub fn skills_installed_list_json<R: tauri::Runtime>(
     serialize_json(rows)
 }
 
+pub fn skill_install_json<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    workspace_id: i64,
+    git_url: &str,
+    branch: &str,
+    source_subdir: &str,
+    enabled: bool,
+) -> crate::shared::error::AppResult<serde_json::Value> {
+    let db = crate::infra::db::init(app)?;
+    let row = crate::skills::install(
+        app,
+        &db,
+        workspace_id,
+        git_url,
+        branch,
+        source_subdir,
+        enabled,
+    )?;
+    serialize_json(row)
+}
+
 pub fn skill_set_enabled_json<R: tauri::Runtime>(
     app: &tauri::AppHandle<R>,
     workspace_id: i64,
@@ -675,6 +701,25 @@ pub fn skill_set_enabled_json<R: tauri::Runtime>(
     let db = crate::infra::db::init(app)?;
     let row = crate::skills::set_enabled(app, &db, workspace_id, skill_id, enabled)?;
     serialize_json(row)
+}
+
+pub fn skill_update_json<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    workspace_id: i64,
+    skill_id: i64,
+) -> crate::shared::error::AppResult<serde_json::Value> {
+    let db = crate::infra::db::init(app)?;
+    let row = crate::skills::update_skill(app, &db, workspace_id, skill_id)?;
+    serialize_json(row)
+}
+
+pub fn skill_check_updates_json<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+    workspace_id: i64,
+) -> crate::shared::error::AppResult<serde_json::Value> {
+    let db = crate::infra::db::init(app)?;
+    let rows = crate::skills::check_updates_for_workspace(app, &db, workspace_id)?;
+    serialize_json(rows)
 }
 
 pub fn skill_uninstall<R: tauri::Runtime>(

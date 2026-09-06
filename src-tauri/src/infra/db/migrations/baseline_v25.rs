@@ -1,8 +1,8 @@
-//! Usage: Baseline schema at version 25 for fresh installs.
+//! Usage: Baseline schema for fresh installs.
 //!
-//! This file creates the complete database schema as it existed at version 25.
+//! This file creates the complete current database schema.
 //! For existing users (user_version >= 25), this is skipped entirely.
-//! Incremental migrations (v25->v26, ..., v28->v29) handle upgrades from v25.
+//! Incremental migrations handle upgrades from earlier supported schemas.
 
 use crate::shared::time::now_unix_seconds;
 use rusqlite::Connection;
@@ -35,6 +35,8 @@ CREATE TABLE IF NOT EXISTS providers (
   base_url_mode TEXT NOT NULL DEFAULT 'order',
   supported_models_json TEXT NOT NULL DEFAULT '{}',
   model_mapping_json TEXT NOT NULL DEFAULT '{}',
+  claude_models_json TEXT NOT NULL DEFAULT '{}',
+  model_policy_json TEXT NULL DEFAULT '{"version":1,"mode":"all","modelPatterns":[],"mappings":[]}',
   UNIQUE(cli_key, name)
 );
 
@@ -68,6 +70,8 @@ CREATE TABLE IF NOT EXISTS request_logs (
   excluded_from_stats INTEGER NOT NULL DEFAULT 0,
   special_settings_json TEXT,
   created_at_ms INTEGER NOT NULL DEFAULT 0,
+  last_activity_ms INTEGER,
+  activity_details_json TEXT,
   session_id TEXT,
   final_provider_id INTEGER
 );
@@ -140,6 +144,7 @@ CREATE TABLE IF NOT EXISTS skills (
   source_git_url TEXT NOT NULL,
   source_branch TEXT NOT NULL,
   source_subdir TEXT NOT NULL,
+  installed_commit TEXT DEFAULT NULL,
   enabled_claude INTEGER NOT NULL DEFAULT 0,
   enabled_codex INTEGER NOT NULL DEFAULT 0,
   enabled_gemini INTEGER NOT NULL DEFAULT 0,
@@ -156,6 +161,7 @@ CREATE INDEX IF NOT EXISTS idx_skills_enabled_flags ON skills(enabled_claude, en
 CREATE TABLE IF NOT EXISTS model_prices (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   cli_key TEXT NOT NULL,
+  vendor TEXT NOT NULL DEFAULT '',
   model TEXT NOT NULL,
   price_json TEXT NOT NULL,
   currency TEXT NOT NULL DEFAULT 'USD',
@@ -171,12 +177,54 @@ CREATE TABLE IF NOT EXISTS provider_circuit_breakers (
   provider_id INTEGER PRIMARY KEY,
   state TEXT NOT NULL,
   failure_count INTEGER NOT NULL DEFAULT 0,
+  failure_timestamps_json TEXT NOT NULL DEFAULT '[]',
+  half_open_success_count INTEGER NOT NULL DEFAULT 0,
   open_until INTEGER,
   updated_at INTEGER NOT NULL,
   FOREIGN KEY(provider_id) REFERENCES providers(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_provider_circuit_breakers_state ON provider_circuit_breakers(state);
+
+CREATE TABLE IF NOT EXISTS provider_extension_values (
+  provider_id INTEGER NOT NULL,
+  plugin_id TEXT NOT NULL,
+  namespace TEXT NOT NULL,
+  values_json TEXT NOT NULL DEFAULT '{}',
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(provider_id, plugin_id, namespace),
+  FOREIGN KEY(provider_id) REFERENCES providers(id) ON DELETE CASCADE,
+  FOREIGN KEY(plugin_id) REFERENCES plugins(plugin_id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_extension_values_plugin_namespace
+  ON provider_extension_values(plugin_id, namespace);
+
+CREATE TABLE IF NOT EXISTS provider_pool_order (
+  cli_key TEXT NOT NULL,
+  provider_id INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(cli_key, provider_id),
+  FOREIGN KEY(provider_id) REFERENCES providers(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_provider_pool_order_cli_sort_order ON provider_pool_order(cli_key, sort_order);
+CREATE INDEX IF NOT EXISTS idx_provider_pool_order_provider_id ON provider_pool_order(provider_id);
+
+CREATE TABLE IF NOT EXISTS default_route_providers (
+  cli_key TEXT NOT NULL,
+  provider_id INTEGER NOT NULL,
+  sort_order INTEGER NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  PRIMARY KEY(cli_key, provider_id),
+  FOREIGN KEY(provider_id) REFERENCES providers(id) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS idx_default_route_providers_cli_sort_order ON default_route_providers(cli_key, sort_order);
+CREATE INDEX IF NOT EXISTS idx_default_route_providers_provider_id ON default_route_providers(provider_id);
 
 CREATE TABLE IF NOT EXISTS sort_modes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -220,6 +268,32 @@ CREATE TABLE IF NOT EXISTS claude_model_validation_runs (
 );
 
 CREATE INDEX IF NOT EXISTS idx_claude_model_validation_runs_provider_id_id ON claude_model_validation_runs(provider_id, id);
+
+CREATE TABLE IF NOT EXISTS image_gen_configs (
+  adapter_id TEXT PRIMARY KEY,
+  base_url TEXT NOT NULL DEFAULT '',
+  api_key_plaintext TEXT NOT NULL DEFAULT '',
+  model TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS image_gen_tasks (
+  id TEXT PRIMARY KEY,
+  adapter_id TEXT NOT NULL DEFAULT 'gpt-image',
+  prompt TEXT NOT NULL DEFAULT '',
+  request_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL DEFAULT 'done',
+  error TEXT,
+  usage_json TEXT,
+  images_json TEXT NOT NULL DEFAULT '[]',
+  ref_images_json TEXT NOT NULL DEFAULT '[]',
+  dir TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  elapsed_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_image_gen_tasks_created ON image_gen_tasks(created_at DESC);
 "#,
     )
     .map_err(|e| format!("failed to create baseline v25 schema: {e}"))?;
@@ -250,11 +324,11 @@ VALUES (?1, ?2, 1, ?3, ?3)
     // Record baseline in schema_migrations
     tx.execute(
         "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (?1, ?2)",
-        (25i64, now),
+        (super::LATEST_SCHEMA_VERSION, now),
     )
     .map_err(|e| format!("failed to record baseline migration: {e}"))?;
 
-    super::set_user_version(&tx, 25)?;
+    super::set_user_version(&tx, super::LATEST_SCHEMA_VERSION)?;
 
     tx.commit()
         .map_err(|e| format!("failed to commit baseline migration: {e}"))?;

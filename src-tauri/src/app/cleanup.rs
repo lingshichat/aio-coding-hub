@@ -1,14 +1,18 @@
 //! Usage: Best-effort cleanup hooks for app lifecycle events (exit/restart).
 
+use super::app_state::{ensure_db_ready, DbInitState};
 use super::gateway_control::app_take_running_gateway;
 use crate::blocking;
 use crate::cli_proxy;
 use crate::gateway::events::GATEWAY_STATUS_EVENT_NAME;
 #[cfg(windows)]
 use crate::infra::wsl;
+use crate::request_logs::{reconcile_unresolved_pending, RequestLogReconcileReason};
+use crate::shared::time::now_unix_millis;
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::OnceLock;
 use std::time::Duration;
+use tauri::Manager;
 use tokio::sync::Notify;
 
 const CLEANUP_STATE_IDLE: u8 = 0;
@@ -17,6 +21,7 @@ const CLEANUP_STATE_DONE: u8 = 2;
 
 const CLEANUP_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
 const CLI_PROXY_RESTORE_TIMEOUT: Duration = Duration::from_secs(3);
+const EXTENSION_HOST_DISPOSE_TIMEOUT: Duration = Duration::from_secs(5);
 const GATEWAY_SERVER_STOP_TIMEOUT: Duration = Duration::from_secs(3);
 const GATEWAY_BACKGROUND_DRAIN_TIMEOUT: Duration = Duration::from_secs(1);
 const GATEWAY_OAUTH_STOP_TIMEOUT: Duration = Duration::from_secs(1);
@@ -55,6 +60,7 @@ pub(crate) async fn cleanup_before_exit(app: &tauri::AppHandle) {
         Ordering::Acquire,
     ) {
         Ok(_) => {
+            dispose_extension_hosts_best_effort(app).await;
             stop_gateway_best_effort(app).await;
             restore_cli_proxy_keep_state_best_effort(
                 app,
@@ -89,6 +95,22 @@ pub(crate) async fn cleanup_before_exit(app: &tauri::AppHandle) {
             }
             wait_for_cleanup_done(notify).await;
         }
+    }
+}
+
+async fn dispose_extension_hosts_best_effort(app: &tauri::AppHandle) {
+    let Some(state) =
+        app.try_state::<crate::app::plugins::extension_host_registry::ExtensionHostRuntimeState>()
+    else {
+        return;
+    };
+
+    match tokio::time::timeout(EXTENSION_HOST_DISPOSE_TIMEOUT, state.dispose_all()).await {
+        Ok(()) => tracing::info!("extension host instances disposed during exit cleanup"),
+        Err(_) => tracing::warn!(
+            "exit cleanup: extension host disposal timed out ({}s)",
+            EXTENSION_HOST_DISPOSE_TIMEOUT.as_secs()
+        ),
     }
 }
 
@@ -206,6 +228,49 @@ pub(crate) async fn stop_gateway_best_effort_unlocked<R: tauri::Runtime>(
         GATEWAY_STOP_TIMEOUTS,
     )
     .await;
+
+    reconcile_gateway_stop_pending_logs_best_effort(app).await;
+}
+
+async fn reconcile_gateway_stop_pending_logs_best_effort<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) {
+    let Some(db_state) = app.try_state::<DbInitState>() else {
+        tracing::warn!(
+            "exit cleanup: DB state unavailable while reconciling pending request logs; startup recovery will retry"
+        );
+        return;
+    };
+
+    let db = match ensure_db_ready(app.clone(), db_state.inner()).await {
+        Ok(db) => db,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "exit cleanup: DB unavailable while reconciling pending request logs; startup recovery will retry"
+            );
+            return;
+        }
+    };
+
+    match reconcile_unresolved_pending(
+        &db,
+        RequestLogReconcileReason::GatewayStop,
+        now_unix_millis(),
+    ) {
+        Ok(count) => {
+            if count > 0 {
+                tracing::info!(
+                    reconciled_count = count,
+                    "exit cleanup reconciled gateway-stop pending request logs"
+                );
+            }
+        }
+        Err(err) => tracing::warn!(
+            error = %err,
+            "exit cleanup: failed to reconcile pending request logs; startup recovery will retry"
+        ),
+    }
 }
 
 async fn stop_gateway_tasks_best_effort(

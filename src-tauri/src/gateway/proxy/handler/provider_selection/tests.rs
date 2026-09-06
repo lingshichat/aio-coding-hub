@@ -1,4 +1,7 @@
-use super::resolve_session_bound_provider_id;
+use super::{
+    filter_providers_by_model_policy, resolve_session_bound_provider_id, ModelPolicyFilterResult,
+    SessionBoundResult,
+};
 use crate::circuit_breaker;
 use crate::{providers, session_manager};
 use std::collections::HashMap;
@@ -7,8 +10,220 @@ fn ids(items: &[providers::ProviderForGateway]) -> Vec<i64> {
     items.iter().map(|p| p.id).collect()
 }
 
+fn gateway_provider(
+    id: i64,
+    policy: Option<providers::ProviderModelPolicyV1>,
+    status: providers::ProviderModelPolicyStatus,
+) -> providers::ProviderForGateway {
+    providers::ProviderForGateway {
+        id,
+        name: format!("P{id}"),
+        base_urls: vec!["https://example.com".to_string()],
+        base_url_mode: providers::ProviderBaseUrlMode::Order,
+        api_key_plaintext: String::new(),
+        claude_models: providers::ClaudeModels::default(),
+        model_policy: policy,
+        model_policy_status: status,
+        limit_5h_usd: None,
+        limit_daily_usd: None,
+        daily_reset_mode: providers::DailyResetMode::Fixed,
+        daily_reset_time: "00:00:00".to_string(),
+        limit_weekly_usd: None,
+        limit_monthly_usd: None,
+        limit_total_usd: None,
+        auth_mode: "api_key".to_string(),
+        oauth_provider_type: None,
+        source_provider_id: None,
+        bridge_type: None,
+        stream_idle_timeout_seconds: None,
+        extension_values: vec![],
+    }
+}
+
+fn selected_policy(source: &str) -> providers::ProviderModelPolicyV1 {
+    providers::ProviderModelPolicyV1 {
+        version: 1,
+        mode: providers::ProviderModelMode::Selected,
+        model_patterns: vec![source.to_string()],
+        mappings: vec![],
+    }
+}
+
+fn mapping_policy(source: &str, target: &str) -> providers::ProviderModelPolicyV1 {
+    providers::ProviderModelPolicyV1 {
+        version: 1,
+        mode: providers::ProviderModelMode::All,
+        model_patterns: vec![],
+        mappings: vec![providers::ProviderModelMapping {
+            source: source.to_string(),
+            target: target.to_string(),
+        }],
+    }
+}
+
+fn excluded_policy(source: &str) -> providers::ProviderModelPolicyV1 {
+    providers::ProviderModelPolicyV1 {
+        version: 1,
+        mode: providers::ProviderModelMode::Excluded,
+        model_patterns: vec![source.to_string()],
+        mappings: vec![],
+    }
+}
+
+#[test]
+fn model_policy_filter_keeps_forced_fallback_provider_despite_explicit_sibling() {
+    // Provider 2 declares the model explicitly; provider 1 is a mode:all fallback the
+    // user forces via x-aio-provider-id. Forcing must not be rejected by the
+    // explicit-first narrowing — only the provider's own policy may block it.
+    let make = || {
+        vec![
+            gateway_provider(
+                1,
+                Some(providers::ProviderModelPolicyV1::all()),
+                providers::ProviderModelPolicyStatus::Ready,
+            ),
+            gateway_provider(
+                2,
+                Some(mapping_policy("gpt-5.6-luna", "deepseek-v4-flash")),
+                providers::ProviderModelPolicyStatus::Ready,
+            ),
+        ]
+    };
+
+    let mut providers = make();
+    let forced = filter_providers_by_model_policy(&mut providers, Some("gpt-5.6-luna"), Some(1));
+    assert_eq!(ids(&providers), vec![1, 2]);
+    assert!(forced.ineligible_provider_ids.is_empty());
+
+    // A forced provider whose own policy blocks the model is still rejected.
+    let mut providers = vec![
+        gateway_provider(
+            1,
+            Some(excluded_policy("gpt-5.6-luna")),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+        gateway_provider(
+            2,
+            Some(mapping_policy("gpt-5.6-luna", "deepseek-v4-flash")),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+    ];
+    let blocked = filter_providers_by_model_policy(&mut providers, Some("gpt-5.6-luna"), Some(1));
+    assert_eq!(ids(&providers), vec![2]);
+    assert_eq!(blocked.ineligible_provider_ids, vec![1]);
+}
+
+#[test]
+fn model_policy_filter_prefers_explicit_matches_and_preserves_order() {
+    let mut providers = vec![
+        gateway_provider(
+            1,
+            Some(providers::ProviderModelPolicyV1::all()),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+        gateway_provider(
+            2,
+            Some(mapping_policy("gpt-5.6-luna", "deepseek-v4-flash")),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+        gateway_provider(
+            3,
+            Some(providers::ProviderModelPolicyV1::all()),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+    ];
+
+    let first = filter_providers_by_model_policy(&mut providers, Some("gpt-5.6-luna"), None);
+    assert_eq!(ids(&providers), vec![2]);
+    assert_eq!(
+        first,
+        ModelPolicyFilterResult {
+            original_provider_ids: vec![1, 2, 3],
+            ineligible_provider_ids: vec![1, 3],
+            invalid_provider_ids: vec![],
+        }
+    );
+
+    providers = vec![
+        gateway_provider(
+            1,
+            Some(providers::ProviderModelPolicyV1::all()),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+        gateway_provider(
+            2,
+            Some(selected_policy("gpt-5.4")),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+        gateway_provider(
+            3,
+            Some(selected_policy("gpt-5.4")),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+    ];
+    filter_providers_by_model_policy(&mut providers, Some("gpt-5.4"), None);
+    assert_eq!(ids(&providers), vec![2, 3]);
+
+    let mut providers = vec![
+        gateway_provider(
+            1,
+            Some(providers::ProviderModelPolicyV1::all()),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+        gateway_provider(
+            2,
+            Some(selected_policy("gpt-5.4")),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+    ];
+    filter_providers_by_model_policy(&mut providers, Some("gpt-5.5"), None);
+    assert_eq!(ids(&providers), vec![1]);
+}
+
+#[test]
+fn model_policy_filter_blocks_excluded_matches() {
+    let mut providers = vec![
+        gateway_provider(
+            1,
+            Some(excluded_policy("gpt-5.6-*")),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+        gateway_provider(
+            2,
+            Some(providers::ProviderModelPolicyV1::all()),
+            providers::ProviderModelPolicyStatus::Ready,
+        ),
+    ];
+
+    let result = filter_providers_by_model_policy(&mut providers, Some("gpt-5.6-luna"), None);
+    assert_eq!(ids(&providers), vec![2]);
+    assert_eq!(result.ineligible_provider_ids, vec![1]);
+}
+
+#[test]
+fn model_policy_filter_is_neutral_without_model_and_fails_closed_for_invalid_rows() {
+    let mut providers = vec![
+        gateway_provider(1, None, providers::ProviderModelPolicyStatus::Legacy),
+        gateway_provider(
+            2,
+            Some(selected_policy("gpt-*")),
+            providers::ProviderModelPolicyStatus::Invalid,
+        ),
+    ];
+
+    let result = filter_providers_by_model_policy(&mut providers, None, None);
+    assert_eq!(ids(&providers), vec![1, 2]);
+    assert_eq!(result.original_provider_ids, vec![1, 2]);
+    assert!(result.ineligible_provider_ids.is_empty());
+    assert!(result.invalid_provider_ids.is_empty());
+
+    let result = filter_providers_by_model_policy(&mut providers, Some("gpt-5.4"), None);
+    assert_eq!(ids(&providers), vec![1]);
+    assert_eq!(result.invalid_provider_ids, vec![2]);
+}
+
 fn insert_provider(db: &crate::db::Db, name: &str, enabled: bool) -> providers::ProviderSummary {
-    providers::upsert(
+    let provider = providers::upsert(
         db,
         providers::ProviderUpsertParams {
             provider_id: None,
@@ -22,6 +237,7 @@ fn insert_provider(db: &crate::db::Db, name: &str, enabled: bool) -> providers::
             cost_multiplier: 1.0,
             priority: Some(100),
             claude_models: None,
+            model_policy: None,
             limit_5h_usd: None,
             limit_daily_usd: None,
             daily_reset_mode: Some(providers::DailyResetMode::Fixed),
@@ -34,9 +250,21 @@ fn insert_provider(db: &crate::db::Db, name: &str, enabled: bool) -> providers::
             source_provider_id: None,
             bridge_type: None,
             stream_idle_timeout_seconds: None,
+            extension_values: None,
         },
     )
-    .expect("insert provider")
+    .expect("insert provider");
+
+    let mut provider_ids: Vec<i64> = providers::default_route_list(db, "claude")
+        .expect("list default route")
+        .into_iter()
+        .map(|row| row.provider_id)
+        .collect();
+    provider_ids.push(provider.id);
+    providers::default_route_set_order(db, "claude", provider_ids)
+        .expect("append default route provider");
+
+    provider
 }
 
 fn insert_sort_mode_with_providers(db: &crate::db::Db, provider_ids: &[i64]) -> i64 {
@@ -76,7 +304,7 @@ fn open_circuit_for_provider(provider_id: i64, now: i64) -> circuit_breaker::Cir
         HashMap::new(),
         None,
     );
-    circuit.record_failure(provider_id, now);
+    circuit.record_failure(provider_id, now, None);
     assert!(!circuit.should_allow(provider_id, now).allow);
     circuit
 }
@@ -108,7 +336,7 @@ fn resolve_session_bound_provider_id_skips_disabled_bound_provider() {
     assert_eq!(ids(&enabled), vec![id2]);
 
     let order = vec![id1, id2];
-    let selected = resolve_session_bound_provider_id(
+    let outcome = resolve_session_bound_provider_id(
         &session,
         &circuit,
         "claude",
@@ -121,7 +349,7 @@ fn resolve_session_bound_provider_id_skips_disabled_bound_provider() {
     );
 
     // Disabled provider must NOT be re-inserted; fall through to next enabled provider
-    assert_eq!(selected, None);
+    assert!(matches!(outcome, SessionBoundResult::NoPreference));
     assert_eq!(ids(&enabled), vec![id2]);
 }
 
@@ -152,7 +380,7 @@ fn resolve_session_bound_provider_id_skips_insertion_when_forced_provider_presen
     assert_eq!(ids(&enabled), vec![id2]);
 
     let order = vec![id1, id2];
-    let selected = resolve_session_bound_provider_id(
+    let outcome = resolve_session_bound_provider_id(
         &session,
         &circuit,
         "claude",
@@ -164,7 +392,7 @@ fn resolve_session_bound_provider_id_skips_insertion_when_forced_provider_presen
         Some(&order),
     );
 
-    assert_eq!(selected, None);
+    assert!(matches!(outcome, SessionBoundResult::NoPreference));
     assert_eq!(ids(&enabled), vec![id2]);
 }
 
@@ -195,7 +423,7 @@ fn resolve_session_bound_provider_id_does_not_insert_when_reuse_disabled() {
     assert_eq!(ids(&enabled), vec![id2]);
 
     let order = vec![id1, id2];
-    let selected = resolve_session_bound_provider_id(
+    let outcome = resolve_session_bound_provider_id(
         &session,
         &circuit,
         "claude",
@@ -207,7 +435,7 @@ fn resolve_session_bound_provider_id_does_not_insert_when_reuse_disabled() {
         Some(&order),
     );
 
-    assert_eq!(selected, None);
+    assert!(matches!(outcome, SessionBoundResult::NoPreference));
     assert_eq!(ids(&enabled), vec![id2]);
 }
 
@@ -238,7 +466,7 @@ fn resolve_session_bound_provider_id_clears_stale_binding_when_bound_provider_no
     assert_eq!(ids(&candidates), vec![id2]);
 
     let order = vec![id1, id2];
-    let selected = resolve_session_bound_provider_id(
+    let outcome = resolve_session_bound_provider_id(
         &session,
         &circuit,
         "claude",
@@ -251,7 +479,7 @@ fn resolve_session_bound_provider_id_clears_stale_binding_when_bound_provider_no
     );
 
     // Must NOT re-insert the stale provider; reuse should fall through.
-    assert_eq!(selected, None);
+    assert!(matches!(outcome, SessionBoundResult::NoPreference));
     assert_eq!(ids(&candidates), vec![id2]);
     assert_eq!(session.get_bound_provider("claude", "sess_1", now), None);
 }
@@ -275,7 +503,7 @@ fn default_mode_switches_to_enabled_provider_after_bound_provider_disabled_and_c
         providers::list_enabled_for_gateway_in_mode(&db, "claude", None).expect("list enabled");
     assert_eq!(ids(&enabled), vec![p2.id]);
 
-    let selected = resolve_session_bound_provider_id(
+    let outcome = resolve_session_bound_provider_id(
         &session,
         &circuit,
         "claude",
@@ -288,12 +516,12 @@ fn default_mode_switches_to_enabled_provider_after_bound_provider_disabled_and_c
     );
 
     assert_eq!(ids(&enabled), vec![p2.id]);
-    assert_eq!(selected, None);
+    assert!(matches!(outcome, SessionBoundResult::NoPreference));
     assert_eq!(session.get_bound_provider("claude", "sess_1", now), None);
 }
 
 #[test]
-fn sort_mode_ignores_global_provider_enabled_but_open_circuit_prevents_session_reuse() {
+fn sort_mode_ignores_global_provider_enabled_but_open_circuit_falls_back() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("test.db");
     let db = crate::db::init_for_tests(&db_path).expect("init db");
@@ -312,7 +540,7 @@ fn sort_mode_ignores_global_provider_enabled_but_open_circuit_prevents_session_r
         .expect("list enabled");
     assert_eq!(ids(&enabled), vec![p1.id, p2.id]);
 
-    let selected = resolve_session_bound_provider_id(
+    let outcome = resolve_session_bound_provider_id(
         &session,
         &circuit,
         "claude",
@@ -324,12 +552,70 @@ fn sort_mode_ignores_global_provider_enabled_but_open_circuit_prevents_session_r
         Some(&[p1.id, p2.id]),
     );
 
-    assert_eq!(ids(&enabled), vec![p1.id, p2.id]);
-    assert_eq!(selected, None);
+    assert_eq!(ids(&enabled), vec![p2.id]);
+
+    // Even though p1 is globally disabled, it was still in the sort_mode candidate list.
+    // Circuit denial caused fallback to p2, but the session binding is intentionally left
+    // pointing at p1 (see original test intent).
+    match outcome {
+        SessionBoundResult::DeniedByCircuit {
+            provider_id,
+            snapshot,
+        } => {
+            assert_eq!(provider_id, p1.id);
+            assert_eq!(snapshot.state, circuit_breaker::CircuitState::Open);
+        }
+        other => panic!("expected DeniedByCircuit, got {:?}", other),
+    }
+
     assert_eq!(
         session.get_bound_provider("claude", "sess_1", now),
         Some(p1.id)
     );
     assert!(!circuit.should_allow(p1.id, now).allow);
     assert!(circuit.should_allow(p2.id, now).allow);
+}
+
+#[test]
+fn acceptance_session_bound_provider_falls_back_when_bound_provider_circuit_is_open() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("test.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let p1 = insert_provider(&db, "P1", true);
+    let p2 = insert_provider(&db, "P2", true);
+    let id1 = p1.id;
+    let id2 = p2.id;
+
+    let session = session_manager::SessionManager::new();
+    let now = 1000;
+    session.bind_success("claude", "sess_1", id1, None, now);
+    let circuit = open_circuit_for_provider(id1, now);
+
+    let mut enabled =
+        providers::list_enabled_for_gateway_in_mode(&db, "claude", None).expect("list enabled");
+    let outcome = resolve_session_bound_provider_id(
+        &session,
+        &circuit,
+        "claude",
+        Some("sess_1"),
+        now,
+        true,
+        None,
+        &mut enabled,
+        Some(&[id1, id2]),
+    );
+
+    // This is the important case for observability: single (or last) bound provider denied by circuit.
+    match outcome {
+        SessionBoundResult::DeniedByCircuit {
+            provider_id,
+            snapshot,
+        } => {
+            assert_eq!(provider_id, id1);
+            assert_eq!(snapshot.state, circuit_breaker::CircuitState::Open);
+        }
+        other => panic!("expected DeniedByCircuit, got {:?}", other),
+    }
+    assert_eq!(ids(&enabled), vec![id2]);
 }

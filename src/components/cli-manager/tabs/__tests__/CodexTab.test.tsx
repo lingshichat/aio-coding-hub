@@ -85,6 +85,39 @@ function createAppSettings(overrides: Parameters<typeof createTestAppSettings>[0
   });
 }
 
+function createCodexModel(overrides: Partial<any> = {}) {
+  return {
+    id: "gpt-5.6-sol-id",
+    model: "gpt-5.6-sol",
+    display_name: "GPT-5.6 Sol",
+    hidden: false,
+    is_default: false,
+    supported_reasoning_efforts: [
+      { reasoning_effort: "low", description: null },
+      { reasoning_effort: "medium", description: null },
+      { reasoning_effort: "high", description: null },
+      { reasoning_effort: "xhigh", description: null },
+      { reasoning_effort: "max", description: "Maximum reasoning depth" },
+      { reasoning_effort: "ultra", description: "Automatic task delegation" },
+    ],
+    default_reasoning_effort: "medium",
+    ...overrides,
+  };
+}
+
+function createCodexModelCatalog(models = [createCodexModel()]) {
+  return {
+    status: "ready" as const,
+    issue: null,
+    snapshot: {
+      config_path: "/home/user/.codex/config.toml",
+      executable_path: "/bin/codex",
+      cli_version: "0.0.0",
+    },
+    models,
+  };
+}
+
 describe("components/cli-manager/tabs/CodexTab", () => {
   it("handles sandbox confirm flow and toggles", () => {
     const persistCodexConfig = vi.fn();
@@ -169,14 +202,16 @@ describe("components/cli-manager/tabs/CodexTab", () => {
     );
     expect(persistCodexConfig).toHaveBeenCalledWith({ personality: "" });
 
-    // Model input blur persists trimmed value and clears gpt-5.4-only linked keys.
+    // Model input blur persists a changed trimmed value and clears model-linked keys.
     const modelItem = screen.getByText("默认模型 (model)").parentElement?.parentElement;
     expect(modelItem).toBeTruthy();
-    const modelInput = within(modelItem as HTMLElement).getByRole("textbox");
-    fireEvent.change(modelInput, { target: { value: "  gpt-5-codex  " } });
+    const modelInput = within(modelItem as HTMLElement).getByRole("combobox", {
+      name: "默认模型 (model)",
+    });
+    fireEvent.change(modelInput, { target: { value: "  gpt-5.6-sol  " } });
     fireEvent.blur(modelInput);
     expect(persistCodexConfig).toHaveBeenCalledWith({
-      model: "gpt-5-codex",
+      model: "gpt-5.6-sol",
       model_context_window: null,
       model_auto_compact_token_limit: null,
     });
@@ -193,6 +228,39 @@ describe("components/cli-manager/tabs/CodexTab", () => {
     for (const sw of screen.getAllByRole("switch")) fireEvent.click(sw);
 
     confirmSpy.mockRestore();
+  });
+
+  it("toggles Codex OAuth compatible proxy mode from app settings", () => {
+    const persistCodexOauthCompatibleProxyMode = vi.fn().mockResolvedValue(true);
+
+    render(
+      <CliManagerCodexTab
+        codexAvailable="available"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={createCodexInfo()}
+        codexConfig={createCodexConfig()}
+        codexConfigToml={{
+          config_path: "/home/user/.codex/config.toml",
+          exists: true,
+          toml: 'approval_policy = "on-request"\\n',
+        }}
+        appSettings={createAppSettings({ codex_oauth_compatible_proxy_mode: false })}
+        refreshCodex={vi.fn()}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={vi.fn()}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(true)}
+        persistCodexOauthCompatibleProxyMode={persistCodexOauthCompatibleProxyMode}
+      />
+    );
+
+    expect(screen.getByText("OAuth 兼容代理模式")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("switch", { name: "切换 Codex OAuth 兼容代理模式" }));
+
+    expect(persistCodexOauthCompatibleProxyMode).toHaveBeenCalledWith(true);
   });
 
   it("renders unavailable state", () => {
@@ -214,6 +282,40 @@ describe("components/cli-manager/tabs/CodexTab", () => {
       />
     );
     expect(screen.getByText("数据不可用")).toBeInTheDocument();
+  });
+
+  it("keeps a loaded Codex config editable when the CLI is unavailable", () => {
+    const persistCodexConfig = vi.fn();
+
+    render(
+      <CliManagerCodexTab
+        codexAvailable="unavailable"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={createCodexInfo({
+          found: false,
+          executable_path: null,
+          version: null,
+        })}
+        codexConfig={createCodexConfig()}
+        codexConfigToml={null}
+        refreshCodex={vi.fn()}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={persistCodexConfig}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    const contextItem = screen.getByText("model_context_window").parentElement?.parentElement;
+    expect(contextItem).toBeTruthy();
+    const contextInput = within(contextItem as HTMLElement).getByRole("spinbutton");
+    expect(contextInput).toBeEnabled();
+    fireEvent.change(contextInput, { target: { value: "1000000" } });
+    fireEvent.blur(contextInput);
+    expect(persistCodexConfig).toHaveBeenCalledWith({ model_context_window: 1_000_000 });
   });
 
   it("disables open config dir and shows hint when CODEX_HOME is overridden", () => {
@@ -628,7 +730,7 @@ describe("components/cli-manager/tabs/CodexTab", () => {
     ).toBeChecked();
   });
 
-  it("shows gpt-5.4 linked settings and persists their defaults", () => {
+  it("always shows model token overrides and skips unchanged model blur", () => {
     const persistCodexConfig = vi.fn();
 
     render(
@@ -640,7 +742,7 @@ describe("components/cli-manager/tabs/CodexTab", () => {
         codexConfigTomlLoading={false}
         codexConfigTomlSaving={false}
         codexInfo={createCodexInfo()}
-        codexConfig={createCodexConfig({ model: "gpt-5.4" })}
+        codexConfig={createCodexConfig({ model: "gpt-5.6-sol", features_multi_agent: null })}
         codexConfigToml={null}
         refreshCodex={vi.fn()}
         openCodexConfigDir={vi.fn()}
@@ -654,17 +756,15 @@ describe("components/cli-manager/tabs/CodexTab", () => {
 
     const modelItem = screen.getByText("默认模型 (model)").parentElement?.parentElement;
     expect(modelItem).toBeTruthy();
-    const modelInput = within(modelItem as HTMLElement).getByRole("textbox");
+    const modelInput = within(modelItem as HTMLElement).getByRole("combobox", {
+      name: "默认模型 (model)",
+    });
     fireEvent.blur(modelInput);
 
-    expect(persistCodexConfig).toHaveBeenCalledWith({
-      model: "gpt-5.4",
-      model_context_window: null,
-      model_auto_compact_token_limit: null,
-    });
+    expect(persistCodexConfig).not.toHaveBeenCalled();
   });
 
-  it("persists null for gpt-5.4 linked settings when input is zero or cleared", () => {
+  it("persists null for model token overrides when input is zero or cleared", () => {
     const persistCodexConfig = vi.fn();
 
     render(
@@ -677,7 +777,7 @@ describe("components/cli-manager/tabs/CodexTab", () => {
         codexConfigTomlSaving={false}
         codexInfo={createCodexInfo()}
         codexConfig={createCodexConfig({
-          model: "gpt-5.4",
+          model: "gpt-5.6-sol",
           model_context_window: 1_000_000,
           model_auto_compact_token_limit: 900_000,
         })}
@@ -705,6 +805,208 @@ describe("components/cli-manager/tabs/CodexTab", () => {
     expect(persistCodexConfig).toHaveBeenCalledWith({
       model_auto_compact_token_limit: null,
     });
+  });
+
+  it("uses catalog efforts for normal mode and keeps max/ultra out of plan mode", () => {
+    const persistCodexConfig = vi.fn();
+
+    render(
+      <CliManagerCodexTab
+        codexAvailable="available"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={createCodexInfo()}
+        codexConfig={createCodexConfig({ model: "gpt-5.6-sol", features_multi_agent: null })}
+        codexConfigToml={null}
+        codexModelCatalog={createCodexModelCatalog()}
+        refreshCodex={vi.fn()}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={persistCodexConfig}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    const reasoningGroup = screen.getByRole("radiogroup", {
+      name: "推理强度 (model_reasoning_effort)",
+    });
+    expect(reasoningGroup).toHaveAccessibleDescription(
+      "调整推理强度（仅对支持的模型/Responses API 生效）。值越高通常越稳健但更慢。"
+    );
+
+    const maxOption = within(reasoningGroup).getByRole("radio", {
+      name: "最大深度 (max)",
+    });
+    expect(maxOption).toHaveAccessibleDescription("最大单任务推理深度，可能增加延迟和用量。");
+
+    const ultraOption = within(reasoningGroup).getByRole("radio", {
+      name: "自动委派 (ultra)",
+    });
+    expect(ultraOption).toHaveAccessibleName("自动委派 (ultra)");
+    expect(ultraOption).toHaveAccessibleDescription(
+      "会自动委派子智能体并行处理任务，增加并发和额外用量。"
+    );
+    expect(screen.getByText(/当前未设置，使用 Codex 默认行为/)).toBeInTheDocument();
+    fireEvent.click(ultraOption);
+    expect(persistCodexConfig).toHaveBeenCalledWith({ model_reasoning_effort: "ultra" });
+
+    const planItem = screen.getByText("计划模式推理强度 (plan_mode_reasoning_effort)").parentElement
+      ?.parentElement;
+    expect(planItem).toBeTruthy();
+    expect(
+      within(planItem as HTMLElement).queryByRole("radio", { name: /最大深度 \(max\)/ })
+    ).toBeNull();
+    expect(
+      within(planItem as HTMLElement).queryByRole("radio", { name: /自动委派 \(ultra\)/ })
+    ).toBeNull();
+  });
+
+  it("keeps the reasoning control editable when the catalog query fails", () => {
+    const refreshCodex = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <CliManagerCodexTab
+        codexAvailable="available"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexModelCatalogError
+        codexInfo={createCodexInfo()}
+        codexConfig={createCodexConfig()}
+        codexConfigToml={null}
+        refreshCodex={refreshCodex}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={vi.fn()}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    expect(screen.getByText("读取模型能力失败，当前推理选项仅供编辑。")).toBeInTheDocument();
+    const reasoningItem = screen.getByText("推理强度 (model_reasoning_effort)").parentElement
+      ?.parentElement;
+    expect(reasoningItem).toBeTruthy();
+    expect(
+      within(reasoningItem as HTMLElement).getByRole("radio", { name: "低 (low)" })
+    ).toBeEnabled();
+    fireEvent.click(
+      within(reasoningItem as HTMLElement).getByRole("button", { name: "重试能力目录" })
+    );
+    expect(refreshCodex).toHaveBeenCalledTimes(1);
+  });
+
+  it("downgrades an incompatible max or ultra effort in the model switch patch", async () => {
+    const persistCodexConfig = vi
+      .fn()
+      .mockResolvedValue(
+        createCodexConfig({ model: "gpt-5.6-luna", model_reasoning_effort: "max" })
+      );
+    const catalog = createCodexModelCatalog([
+      createCodexModel(),
+      createCodexModel({
+        id: "gpt-5.6-luna-id",
+        model: "gpt-5.6-luna",
+        supported_reasoning_efforts: [
+          { reasoning_effort: "low", description: null },
+          { reasoning_effort: "high", description: null },
+          { reasoning_effort: "max", description: null },
+        ],
+      }),
+    ]);
+
+    render(
+      <CliManagerCodexTab
+        codexAvailable="available"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={createCodexInfo()}
+        codexConfig={createCodexConfig({ model: "gpt-5.6-sol", model_reasoning_effort: "ultra" })}
+        codexConfigToml={null}
+        codexModelCatalog={catalog}
+        refreshCodex={vi.fn()}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={persistCodexConfig}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    const modelItem = screen.getByText("默认模型 (model)").parentElement?.parentElement;
+    expect(modelItem).toBeTruthy();
+    const modelInput = within(modelItem as HTMLElement).getByRole("combobox", {
+      name: "默认模型 (model)",
+    });
+    fireEvent.change(modelInput, { target: { value: "gpt-5.6-luna" } });
+    expect(screen.getByRole("radio", { name: /自动委派 \(ultra\)/ })).toBeInTheDocument();
+    expect(persistCodexConfig).not.toHaveBeenCalled();
+    fireEvent.blur(modelInput);
+
+    await waitFor(() =>
+      expect(persistCodexConfig).toHaveBeenCalledWith({
+        model: "gpt-5.6-luna",
+        model_context_window: null,
+        model_auto_compact_token_limit: null,
+        model_reasoning_effort: "max",
+      })
+    );
+  });
+
+  it("keeps the saved configuration unchanged and reports model migration failure", async () => {
+    const persistCodexConfig = vi.fn().mockResolvedValue(null);
+    const catalog = createCodexModelCatalog([
+      createCodexModel(),
+      createCodexModel({
+        id: "gpt-5.6-luna-id",
+        model: "gpt-5.6-luna",
+        supported_reasoning_efforts: [
+          { reasoning_effort: "low", description: null },
+          { reasoning_effort: "max", description: null },
+        ],
+      }),
+    ]);
+
+    render(
+      <CliManagerCodexTab
+        codexAvailable="available"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={createCodexInfo()}
+        codexConfig={createCodexConfig({
+          model: "gpt-5.6-sol",
+          model_reasoning_effort: "ultra",
+          model_context_window: 1_000_000,
+          model_auto_compact_token_limit: 900_000,
+        })}
+        codexConfigToml={null}
+        codexModelCatalog={catalog}
+        refreshCodex={vi.fn()}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={persistCodexConfig}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    const modelItem = screen.getByText("默认模型 (model)").parentElement?.parentElement;
+    expect(modelItem).toBeTruthy();
+    const modelInput = within(modelItem as HTMLElement).getByRole("combobox", {
+      name: "默认模型 (model)",
+    });
+    fireEvent.change(modelInput, { target: { value: "gpt-5.6-luna" } });
+    fireEvent.blur(modelInput);
+
+    await waitFor(() =>
+      expect(screen.getByText("模型保存失败，未清除覆盖或调整推理强度。")).toBeInTheDocument()
+    );
+    expect(screen.getByDisplayValue("1000000")).toBeInTheDocument();
+    expect(screen.getByDisplayValue("900000")).toBeInTheDocument();
   });
 
   it("resets toml draft when codex config path changes", async () => {
@@ -776,5 +1078,164 @@ describe("components/cli-manager/tabs/CodexTab", () => {
     expect(screen.getByLabelText("mock-code-editor")).toHaveValue('model = "gpt-5.4"\n');
     expect(screen.getByRole("button", { name: "编辑" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "取消" })).not.toBeInTheDocument();
+  });
+
+  it("validates, cancels, reloads, and saves raw config.toml edits", async () => {
+    const persistCodexConfigToml = vi.fn().mockResolvedValueOnce(false).mockResolvedValueOnce(true);
+    vi.mocked(cliManagerCodexConfigTomlValidate)
+      .mockResolvedValueOnce({ ok: true, error: null })
+      .mockResolvedValueOnce({
+        ok: false,
+        error: { message: "invalid toml", line: 2, column: 3 },
+      })
+      .mockResolvedValueOnce({ ok: true, error: null })
+      // 每次点击「保存」都会先同步校验一次；两次保存各消耗一次 mock
+      .mockResolvedValueOnce({ ok: true, error: null })
+      .mockResolvedValueOnce({ ok: true, error: null });
+
+    render(
+      <CliManagerCodexTab
+        codexAvailable="available"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={createCodexInfo()}
+        codexConfig={createCodexConfig({ config_path: null })}
+        codexConfigToml={{
+          config_path: "/home/user/.codex/config.toml",
+          exists: true,
+          toml: 'model = "gpt-5"\n',
+        }}
+        refreshCodex={vi.fn()}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={vi.fn()}
+        persistCodexConfigToml={persistCodexConfigToml}
+      />
+    );
+
+    fireEvent.click(screen.getByText("高级配置（config.toml）"));
+    const reloadButton = await screen.findByRole("button", { name: "重新加载" });
+    expect(
+      screen.getByText((_, element) => element?.textContent === "/home/user/.codex/config.toml")
+    ).toBeInTheDocument();
+
+    fireEvent.click(reloadButton);
+    expect(screen.getByLabelText("mock-code-editor")).toHaveValue('model = "gpt-5"\n');
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    await waitFor(() => expect(cliManagerCodexConfigTomlValidate).toHaveBeenCalled());
+
+    fireEvent.change(screen.getByLabelText("mock-code-editor"), {
+      target: { value: "bad = [" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    expect(await screen.findByText("TOML 校验失败")).toBeInTheDocument();
+    expect(screen.getByText("invalid toml")).toBeInTheDocument();
+    expect(screen.getByText("(line 2, column 3)")).toBeInTheDocument();
+    expect(persistCodexConfigToml).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("mock-code-editor"), {
+      target: { value: 'model = "gpt-5.4"\n' },
+    });
+    await waitFor(
+      () => {
+        expect(cliManagerCodexConfigTomlValidate).toHaveBeenCalledWith('model = "gpt-5.4"\n');
+      },
+      { timeout: 1200 }
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => {
+      expect(persistCodexConfigToml).toHaveBeenCalledWith('model = "gpt-5.4"\n');
+    });
+    expect(screen.getByRole("button", { name: "取消" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+    await waitFor(() => expect(persistCodexConfigToml).toHaveBeenCalledTimes(2));
+    expect(await screen.findByRole("button", { name: "编辑" })).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑" }));
+    fireEvent.change(screen.getByLabelText("mock-code-editor"), {
+      target: { value: 'model = "discarded"\n' },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    expect(screen.getByLabelText("mock-code-editor")).toHaveValue('model = "gpt-5"\n');
+  });
+
+  it("renders loading, missing config, fallback info, and detection error states", async () => {
+    const refreshCodex = vi.fn().mockResolvedValue(undefined);
+
+    const { rerender } = render(
+      <CliManagerCodexTab
+        codexAvailable="checking"
+        codexLoading={true}
+        codexConfigLoading={true}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={null}
+        codexConfig={null}
+        codexConfigToml={null}
+        refreshCodex={refreshCodex}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={vi.fn()}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    expect(screen.getByText("加载中...")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "刷新" })).toBeDisabled();
+    expect(screen.getByText("暂无配置，请尝试刷新")).toBeInTheDocument();
+
+    rerender(
+      <CliManagerCodexTab
+        codexAvailable="available"
+        codexLoading={false}
+        codexConfigLoading={false}
+        codexConfigSaving={false}
+        codexConfigTomlLoading={false}
+        codexConfigTomlSaving={false}
+        codexInfo={createCodexInfo({
+          found: false,
+          version: null,
+          executable_path: null,
+          resolved_via: null,
+          shell: null,
+          error: "codex boom",
+        })}
+        codexConfig={createCodexConfig({
+          exists: false,
+          executable_path: undefined,
+          resolved_via: undefined,
+          config_dir: "",
+          config_path: "",
+          user_home_default_dir: "",
+          follow_codex_home_dir: "",
+          approval_policy: null,
+          sandbox_mode: null,
+          model: null,
+          model_reasoning_effort: null,
+          plan_mode_reasoning_effort: null,
+          web_search: null,
+          personality: "  ",
+        })}
+        codexConfigToml={null}
+        refreshCodex={refreshCodex}
+        openCodexConfigDir={vi.fn()}
+        persistCodexConfig={vi.fn()}
+        persistCodexConfigToml={vi.fn().mockResolvedValue(false)}
+      />
+    );
+
+    expect(screen.getByText("未检测到")).toBeInTheDocument();
+    expect(screen.getByText("不存在（将自动创建）")).toBeInTheDocument();
+    expect(screen.getAllByText("—").length).toBeGreaterThan(0);
+    expect(screen.getByText("检测失败：")).toBeInTheDocument();
+    expect(screen.getByText("codex boom")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "刷新" }));
+    await waitFor(() => expect(refreshCodex).toHaveBeenCalled());
   });
 });

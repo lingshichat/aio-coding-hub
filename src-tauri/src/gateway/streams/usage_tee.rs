@@ -11,9 +11,12 @@ use std::time::Duration;
 
 use super::super::events::{emit_gateway_debug_log, emit_gateway_debug_log_lazy};
 use super::super::proxy::{
-    is_fake_200_non_stream_body, upstream_client_error_rules, GatewayErrorCode,
+    detect_fake_200_non_stream_body, upstream_client_error_rules, Fake200Profile, GatewayErrorCode,
 };
-use super::super::util::{lossy_utf8_preview, now_unix_seconds, MAX_DEBUG_BODY_PREVIEW_BYTES};
+use super::super::util::{
+    lossy_utf8_preview, now_unix_millis, now_unix_seconds, MAX_DEBUG_BODY_PREVIEW_BYTES,
+};
+use super::plugin_chunk::PLUGIN_STREAM_ERROR_MARKER;
 use super::request_end::{emit_request_event_and_spawn_request_log, StreamRequestCompletion};
 use super::{RelayBodyStream, StreamFinalizeCtx};
 
@@ -32,20 +35,15 @@ fn is_codex_client_abort_successish(
     saw_stream_output: bool,
     completion_seen: bool,
     usage_seen: bool,
-    terminal_error_seen: bool,
-    upstream_ended_normally: bool,
+    _terminal_error_seen: bool,
+    _upstream_ended_normally: bool,
 ) -> bool {
     is_codex_responses_path(cli_key, path)
         && (200..300).contains(&status)
         && saw_stream_output
         // For codex, downstream disconnect can race with trailing markers.
-        // If completion/usage is already observed, do not downgrade to 499.
-        && (usage_seen
-            || completion_seen
-            // If downstream disconnected and upstream never naturally ended, trailing terminal
-            // markers are often disconnect side-effects and should not force a 499.
-            || !terminal_error_seen
-            || !upstream_ended_normally)
+        // Completion/usage is required before treating the request as successful.
+        && (usage_seen || completion_seen)
 }
 
 fn is_codex_drop_successish(
@@ -109,6 +107,39 @@ fn is_codex_body_buffer_drop_successish(
         && usage_seen
 }
 
+fn is_plugin_stream_error_chunk(chunk: &[u8]) -> bool {
+    chunk
+        .windows(PLUGIN_STREAM_ERROR_MARKER.len())
+        .any(|window| window == PLUGIN_STREAM_ERROR_MARKER.as_bytes())
+}
+
+fn spawn_touch_activity<R: tauri::Runtime>(
+    ctx: &StreamFinalizeCtx<R>,
+    last_activity_ms: i64,
+    details: Option<String>,
+) {
+    if ctx.observe {
+        ctx.active_requests
+            .touch(ctx.trace_id.as_str(), last_activity_ms);
+    }
+
+    let db = ctx.db.clone();
+    let trace_id = ctx.trace_id.clone();
+    let cli_key = ctx.cli_key.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Err(err) =
+            crate::request_logs::touch_activity(&db, &trace_id, &cli_key, last_activity_ms, details)
+        {
+            tracing::warn!(
+                trace_id = %trace_id,
+                cli = %cli_key,
+                error = %err,
+                "request log activity touch failed"
+            );
+        }
+    });
+}
+
 struct NextFuture<'a, S: Stream + Unpin>(&'a mut S);
 
 impl<'a, S: Stream + Unpin> Future for NextFuture<'a, S> {
@@ -138,6 +169,7 @@ where
     idle_sleep: Option<Pin<Box<tokio::time::Sleep>>>,
     finalized: bool,
     defer_terminal_error: bool,
+    stop_after_terminal_error: bool,
 }
 
 impl<S, B, R> UsageSseTeeStream<S, B, R>
@@ -155,13 +187,14 @@ where
     ) -> Self {
         Self {
             upstream,
-            tracker: usage::SseUsageTracker::new(&ctx.cli_key),
+            tracker: usage::SseUsageTracker::new_for_request(&ctx.cli_key, &ctx.path),
             ctx,
             first_byte_ms: initial_first_byte_ms,
             idle_timeout,
             idle_sleep: idle_timeout.map(|d| Box::pin(tokio::time::sleep(d))),
             finalized: false,
             defer_terminal_error: false,
+            stop_after_terminal_error: false,
         }
     }
 
@@ -175,13 +208,19 @@ where
         cx: &mut Context<'_>,
         enforce_idle_timeout: bool,
     ) -> Poll<Option<Result<B, reqwest::Error>>> {
+        if self.stop_after_terminal_error {
+            return Poll::Ready(None);
+        }
+
         let next = Pin::new(&mut self.upstream).poll_next(cx);
 
         match next {
             Poll::Pending => {
+                // Upstream has no data right now; only then check the idle timer.
+                // Drain path (enforce_idle_timeout=false) keeps its own deadline.
                 if enforce_idle_timeout {
-                    if let Some(timer) = self.idle_sleep.as_mut() {
-                        if timer.as_mut().poll(cx).is_ready() {
+                    if let Some(sleep) = self.idle_sleep.as_mut() {
+                        if sleep.as_mut().poll(cx).is_ready() {
                             self.finalize(Some(GatewayErrorCode::StreamIdleTimeout.as_str()));
                             return Poll::Ready(None);
                         }
@@ -220,6 +259,15 @@ where
                 });
                 let was_terminal_error = self.tracker.terminal_error_seen();
                 self.tracker.ingest_chunk(chunk.as_ref());
+                if let Ok(mut activity) = self.ctx.activity.lock() {
+                    if activity.observe_chunk_at(now_unix_millis().min(i64::MAX as u64) as i64) {
+                        spawn_touch_activity(
+                            &self.ctx,
+                            activity.last_activity_ms(),
+                            activity.details_json(None),
+                        );
+                    }
+                }
                 if self.tracker.terminal_error_seen() {
                     if !was_terminal_error {
                         emit_gateway_debug_log(
@@ -240,6 +288,10 @@ where
                             GatewayErrorCode::StreamError.as_str()
                         };
                         self.finalize(Some(code));
+                        if is_plugin_stream_error_chunk(chunk.as_ref()) {
+                            self.stop_after_terminal_error = true;
+                            return Poll::Ready(Some(Ok(chunk)));
+                        }
                         return Poll::Ready(None);
                     }
                 }
@@ -247,14 +299,15 @@ where
             }
             Poll::Ready(Some(Err(err))) => {
                 let completion_seen = self.tracker.completion_seen();
-                let codex_successish = is_codex_stream_tail_error_successish(
-                    &self.ctx.cli_key,
-                    &self.ctx.path,
-                    self.ctx.status,
-                    self.first_byte_ms.is_some(),
-                    completion_seen,
-                    completion_seen,
-                );
+                let codex_successish = !self.tracker.fake_200_detected()
+                    && is_codex_stream_tail_error_successish(
+                        &self.ctx.cli_key,
+                        &self.ctx.path,
+                        self.ctx.status,
+                        self.first_byte_ms.is_some(),
+                        completion_seen,
+                        completion_seen,
+                    );
                 if codex_successish {
                     emit_gateway_debug_log(
                         &self.ctx.app,
@@ -280,10 +333,39 @@ where
         self.finalized = true;
 
         let usage = self.tracker.finalize();
+        let effective_error_code = if error_code.is_none() && self.tracker.fake_200_detected() {
+            Some(GatewayErrorCode::Fake200.as_str())
+        } else {
+            error_code
+        };
+        let terminal_signal = if effective_error_code.is_some() {
+            Some("error")
+        } else if self.tracker.completion_seen() {
+            Some("completed")
+        } else {
+            None
+        };
+        if let Ok(activity) = self.ctx.activity.lock() {
+            spawn_touch_activity(
+                &self.ctx,
+                activity.last_activity_ms(),
+                activity.details_json(terminal_signal),
+            );
+        }
 
         // Propagate fake 200 detection from tracker to finalize context.
         if self.tracker.fake_200_detected() {
             self.ctx.fake_200_detected = true;
+            if let Some(reason) = self.tracker.fake_200_reason() {
+                response_fixer::push_special_setting(
+                    &self.ctx.special_settings,
+                    serde_json::json!({
+                        "type": "fake_200_detection",
+                        "scope": "stream",
+                        "reason_code": reason.as_str(),
+                    }),
+                );
+            }
         }
         let usage_metrics = usage.as_ref().map(|u| u.metrics.clone());
         let requested_model = self
@@ -295,12 +377,13 @@ where
         emit_request_event_and_spawn_request_log(
             &self.ctx,
             StreamRequestCompletion::from_error_code(
-                error_code,
+                effective_error_code,
                 self.first_byte_ms,
                 requested_model,
                 usage_metrics,
                 usage,
-            ),
+            )
+            .with_terminal_signal(terminal_signal),
         );
     }
 }
@@ -368,15 +451,16 @@ where
             let completion_seen = self.tracker.completion_seen();
             let terminal_error_seen = self.tracker.terminal_error_seen();
 
-            let codex_successish = is_codex_drop_successish(
-                &self.ctx.cli_key,
-                &self.ctx.path,
-                self.ctx.status,
-                self.first_byte_ms.is_some(),
-                completion_seen,
-                usage_seen,
-                terminal_error_seen,
-            );
+            let codex_successish = !self.tracker.fake_200_detected()
+                && is_codex_drop_successish(
+                    &self.ctx.cli_key,
+                    &self.ctx.path,
+                    self.ctx.status,
+                    self.first_byte_ms.is_some(),
+                    completion_seen,
+                    usage_seen,
+                    terminal_error_seen,
+                );
 
             if codex_successish {
                 self.finalize(None);
@@ -481,8 +565,10 @@ where
             }
 
             tokio::select! {
+                biased;
                 // 如果客户端提前断开，但上游短时间没有新 chunk，就会卡在 next_item().await。
                 // 这里通过监听 rx 端被 drop 来更早感知断开，避免误记 GW_STREAM_ABORTED。
+                // 如果断开和 idle timeout 同时 ready，断开应优先进入 Codex drain。
                 _ = tx.closed() => {
                     client_abort_detected_by = Some("rx_closed");
                     downstream_closed = true;
@@ -540,14 +626,15 @@ where
             // For Codex /v1/responses, completion_seen implies response.completed
             // was received (which carries usage). We treat this as a proxy for
             // usage_seen to avoid consuming tracker state before tee.finalize().
-            let codex_successish = is_codex_stream_terminal_error_successish(
-                &tee.ctx.cli_key,
-                &tee.ctx.path,
-                tee.ctx.status,
-                saw_stream_output,
-                completion_seen,
-                completion_seen,
-            );
+            let codex_successish = !tee.tracker.fake_200_detected()
+                && is_codex_stream_terminal_error_successish(
+                    &tee.ctx.cli_key,
+                    &tee.ctx.path,
+                    tee.ctx.status,
+                    saw_stream_output,
+                    completion_seen,
+                    completion_seen,
+                );
 
             if codex_successish {
                 tee.finalize(None);
@@ -604,16 +691,17 @@ where
             // Codex SSE: 2xx + saw output + no terminal error => treat client disconnect as success.
             // Do NOT require completion_seen: ChatGPT backend's response.completed may arrive
             // after the client disconnects and the drain window may not capture it.
-            let codex_successish = is_codex_client_abort_successish(
-                &tee.ctx.cli_key,
-                &tee.ctx.path,
-                tee.ctx.status,
-                saw_stream_output,
-                completion_seen,
-                usage_seen,
-                terminal_error_seen,
-                upstream_ended_normally,
-            );
+            let codex_successish = !tee.tracker.fake_200_detected()
+                && is_codex_client_abort_successish(
+                    &tee.ctx.cli_key,
+                    &tee.ctx.path,
+                    tee.ctx.status,
+                    saw_stream_output,
+                    completion_seen,
+                    usage_seen,
+                    terminal_error_seen,
+                    upstream_ended_normally,
+                );
             if codex_successish {
                 tee.finalize(None);
             } else {
@@ -676,11 +764,14 @@ where
         }
         self.finalized = true;
 
-        let effective_error_code = if error_code.is_none()
-            && !self.truncated
-            && !self.buffer.is_empty()
-            && is_fake_200_non_stream_body(&self.buffer)
-        {
+        let detection = (!self.truncated).then(|| {
+            detect_fake_200_non_stream_body(
+                &self.buffer,
+                Fake200Profile::for_request(&self.ctx.cli_key, &self.ctx.path),
+            )
+        });
+        let detection = detection.flatten();
+        let effective_error_code = if error_code.is_none() && detection.is_some() {
             Some(GatewayErrorCode::Fake200.as_str())
         } else {
             error_code
@@ -689,6 +780,16 @@ where
             self.ctx.fake_200_detected = true;
             self.ctx.fake_200_quota_exhausted =
                 upstream_client_error_rules::match_quota_exhausted(&self.buffer);
+            if let Some(detection) = detection {
+                response_fixer::push_special_setting(
+                    &self.ctx.special_settings,
+                    serde_json::json!({
+                        "type": "fake_200_detection",
+                        "scope": "response",
+                        "reason_code": detection.reason.as_str(),
+                    }),
+                );
+            }
         }
 
         let usage = if self.truncated || self.buffer.is_empty() {
@@ -811,9 +912,12 @@ mod tests {
     use super::{
         is_codex_body_buffer_drop_successish, is_codex_client_abort_successish,
         is_codex_drop_successish, is_codex_responses_path, is_codex_stream_tail_error_successish,
-        is_codex_stream_terminal_error_successish, next_item, spawn_usage_sse_relay_body,
-        RelayBodyStream, StreamFinalizeCtx,
+        is_codex_stream_terminal_error_successish, is_plugin_stream_error_chunk, next_item,
+        spawn_touch_activity, spawn_usage_sse_relay_body, RelayBodyStream, StreamFinalizeCtx,
     };
+    use crate::gateway::active_requests::{ActiveRequestRegistry, ActiveRequestStart};
+    use crate::gateway::proxy::GatewayErrorCode;
+    use crate::gateway::streams::StreamActivityTracker;
     use crate::{circuit_breaker, db, request_logs, session_manager};
     use axum::body::Bytes;
     use std::collections::HashMap;
@@ -824,11 +928,14 @@ mod tests {
         app: tauri::AppHandle<tauri::test::MockRuntime>,
         db: db::Db,
         log_tx: tokio::sync::mpsc::Sender<request_logs::RequestLogInsert>,
+        active_requests: Arc<ActiveRequestRegistry>,
     ) -> StreamFinalizeCtx<tauri::test::MockRuntime> {
         StreamFinalizeCtx {
             app,
             db,
             log_tx,
+            plugin_pipeline: crate::gateway::plugins::pipeline::GatewayPluginPipeline::empty_shared(
+            ),
             circuit: Arc::new(circuit_breaker::CircuitBreaker::new(
                 circuit_breaker::CircuitBreakerConfig::default(),
                 HashMap::new(),
@@ -845,6 +952,7 @@ mod tests {
             query: None,
             excluded_from_stats: false,
             special_settings: Arc::new(Mutex::new(Vec::new())),
+            provider_health_neutral: false,
             status: 200,
             error_category: None,
             error_code: None,
@@ -861,6 +969,25 @@ mod tests {
             auth_mode: "api_key".to_string(),
             fake_200_detected: false,
             fake_200_quota_exhausted: false,
+            activity: Arc::new(Mutex::new(StreamActivityTracker::new(
+                "trace-usage-tee-drain",
+                "codex",
+                1_700_000_000_000,
+            ))),
+            active_requests,
+        }
+    }
+
+    fn active_request_start(trace_id: &str) -> ActiveRequestStart {
+        ActiveRequestStart {
+            trace_id: trace_id.to_string(),
+            cli_key: "codex".to_string(),
+            method: "POST".to_string(),
+            path: "/v1/responses".to_string(),
+            query: None,
+            session_id: Some("sess-usage-tee-drain".to_string()),
+            requested_model: Some("gpt-5".to_string()),
+            created_at_ms: 1_700_000_000_000,
         }
     }
 
@@ -874,8 +1001,50 @@ mod tests {
     }
 
     #[test]
-    fn codex_client_abort_successish_allows_terminal_marker_when_upstream_not_ended() {
-        assert!(is_codex_client_abort_successish(
+    fn stream_activity_tracker_flushes_at_most_every_30_seconds() {
+        let mut tracker = StreamActivityTracker::new("trace-a", "codex", 1_000);
+        assert!(!tracker.observe_chunk_at(10_000));
+        assert!(!tracker.observe_chunk_at(30_999));
+        assert!(tracker.observe_chunk_at(31_000));
+        assert!(!tracker.observe_chunk_at(45_000));
+        assert!(tracker.observe_chunk_at(61_000));
+    }
+
+    #[test]
+    fn spawn_touch_activity_updates_active_registry_immediately() {
+        let app = tauri::test::mock_app();
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("usage-tee-touch.sqlite"))
+            .expect("init test db");
+        let (log_tx, _log_rx) = tokio::sync::mpsc::channel(4);
+        let active_requests = Arc::new(ActiveRequestRegistry::default());
+        active_requests.register(active_request_start("trace-usage-tee-drain"));
+        let ctx =
+            test_stream_finalize_ctx(app.handle().clone(), db, log_tx, active_requests.clone());
+
+        spawn_touch_activity(&ctx, 1_700_000_045_000, None);
+
+        assert_eq!(
+            active_requests.snapshot()[0].last_activity_ms,
+            1_700_000_045_000
+        );
+    }
+
+    #[test]
+    fn plugin_stream_error_chunk_is_still_detected_without_rewriting_marker() {
+        let chunk = Bytes::from_static(
+            b": aio-plugin-error\nevent: error\ndata: {\"error\":\"plugin_failed\"}\n\n",
+        );
+        assert!(is_plugin_stream_error_chunk(chunk.as_ref()));
+        assert_eq!(
+            std::str::from_utf8(chunk.as_ref()).expect("utf8"),
+            ": aio-plugin-error\nevent: error\ndata: {\"error\":\"plugin_failed\"}\n\n"
+        );
+    }
+
+    #[test]
+    fn codex_client_abort_successish_rejects_terminal_marker_without_completion_or_usage() {
+        assert!(!is_codex_client_abort_successish(
             "codex",
             "/v1/responses",
             200,
@@ -883,6 +1052,30 @@ mod tests {
             false,
             false,
             true,
+            false
+        ));
+    }
+
+    #[test]
+    fn codex_client_abort_successish_requires_completion_or_usage() {
+        assert!(!is_codex_client_abort_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            false,
+            false,
+            false,
+            false
+        ));
+        assert!(is_codex_client_abort_successish(
+            "codex",
+            "/v1/responses",
+            200,
+            true,
+            true,
+            false,
+            false,
             false
         ));
     }
@@ -909,7 +1102,7 @@ mod tests {
             true,
             true
         ));
-        assert!(is_codex_client_abort_successish(
+        assert!(!is_codex_client_abort_successish(
             "codex",
             "/v1/responses",
             200,
@@ -1116,7 +1309,9 @@ mod tests {
         let db = db::init_for_tests(&db_dir.path().join("usage-tee-drain.sqlite"))
             .expect("init test db");
         let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
-        let ctx = test_stream_finalize_ctx(app_handle, db, log_tx);
+        let active_requests = Arc::new(ActiveRequestRegistry::default());
+        active_requests.register(active_request_start("trace-usage-tee-drain"));
+        let ctx = test_stream_finalize_ctx(app_handle, db, log_tx, active_requests.clone());
         let (upstream_tx, upstream_rx) =
             tokio::sync::mpsc::channel::<Result<Bytes, reqwest::Error>>(4);
 
@@ -1169,5 +1364,125 @@ mod tests {
             .special_settings_json
             .as_deref()
             .is_some_and(|value| value.contains("\"client_abort\"")));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_idle_timeout_fires_after_configured_silence() {
+        let app = tauri::test::mock_app();
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("usage-tee-idle-timeout.sqlite"))
+            .expect("init test db");
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let active_requests = Arc::new(ActiveRequestRegistry::default());
+        active_requests.register(active_request_start("trace-usage-tee-drain"));
+        let ctx = test_stream_finalize_ctx(app.handle().clone(), db, log_tx, active_requests);
+        let (upstream_tx, upstream_rx) =
+            tokio::sync::mpsc::channel::<Result<Bytes, reqwest::Error>>(4);
+
+        let body = spawn_usage_sse_relay_body(
+            RelayBodyStream::new(upstream_rx),
+            ctx,
+            Some(Duration::from_millis(500)),
+            None,
+        );
+        let mut body_stream = body.into_data_stream();
+
+        // Chunk gaps (100ms) are below the idle window (500ms) but sum above
+        // it: all chunks arriving proves each chunk resets the timer. The 5x
+        // margin absorbs scheduler hiccups on loaded CI runners; tokio::time
+        // pause is not an option because the request log is delivered from
+        // tauri's separate real-time runtime.
+        for _ in 0..3 {
+            upstream_tx
+                .send(Ok(Bytes::from_static(
+                    b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+                )))
+                .await
+                .expect("send output chunk");
+            let chunk = tokio::time::timeout(Duration::from_secs(1), next_item(&mut body_stream))
+                .await
+                .expect("output chunk should arrive")
+                .expect("body should yield output chunk")
+                .expect("output chunk should be ok");
+            assert!(chunk.as_ref().starts_with(b"data:"));
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+
+        // Upstream goes silent without closing; downstream stays connected.
+        // The idle timeout must end the body stream.
+        let end = tokio::time::timeout(Duration::from_secs(2), next_item(&mut body_stream))
+            .await
+            .expect("idle timeout should end the body stream");
+        assert!(end.is_none());
+
+        let log = tokio::time::timeout(Duration::from_secs(2), log_rx.recv())
+            .await
+            .expect("request log should be enqueued")
+            .expect("request log channel should stay open");
+        assert_eq!(
+            log.error_code,
+            Some(GatewayErrorCode::StreamIdleTimeout.as_str().to_string())
+        );
+        drop(upstream_tx);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn stream_idle_timeout_disabled_keeps_stream_open() {
+        let app = tauri::test::mock_app();
+        let db_dir = tempfile::tempdir().expect("db dir");
+        let db = db::init_for_tests(&db_dir.path().join("usage-tee-idle-disabled.sqlite"))
+            .expect("init test db");
+        let (log_tx, mut log_rx) = tokio::sync::mpsc::channel(4);
+        let active_requests = Arc::new(ActiveRequestRegistry::default());
+        active_requests.register(active_request_start("trace-usage-tee-drain"));
+        let ctx = test_stream_finalize_ctx(app.handle().clone(), db, log_tx, active_requests);
+        let (upstream_tx, upstream_rx) =
+            tokio::sync::mpsc::channel::<Result<Bytes, reqwest::Error>>(4);
+
+        let body = spawn_usage_sse_relay_body(RelayBodyStream::new(upstream_rx), ctx, None, None);
+        let mut body_stream = body.into_data_stream();
+
+        upstream_tx
+            .send(Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"hello\"}\n\n",
+            )))
+            .await
+            .expect("send first output chunk");
+        let first = tokio::time::timeout(Duration::from_secs(1), next_item(&mut body_stream))
+            .await
+            .expect("first output chunk should arrive")
+            .expect("body should yield first output")
+            .expect("first output should be ok");
+        assert!(first.as_ref().starts_with(b"data:"));
+
+        // Silence longer than any small idle window; disabled timeout must not
+        // interrupt the stream.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        upstream_tx
+            .send(Ok(Bytes::from_static(
+                b"data: {\"type\":\"response.output_text.delta\",\"delta\":\"world\"}\n\n",
+            )))
+            .await
+            .expect("send second output chunk");
+        let second = tokio::time::timeout(Duration::from_secs(1), next_item(&mut body_stream))
+            .await
+            .expect("second output chunk should arrive")
+            .expect("body should yield second output")
+            .expect("second output should be ok");
+        assert!(second.as_ref().starts_with(b"data:"));
+
+        // Let the stream end normally.
+        drop(upstream_tx);
+        let end = tokio::time::timeout(Duration::from_secs(1), next_item(&mut body_stream))
+            .await
+            .expect("body stream should end after upstream closes");
+        assert!(end.is_none());
+
+        let log = tokio::time::timeout(Duration::from_secs(2), log_rx.recv())
+            .await
+            .expect("request log should be enqueued")
+            .expect("request log channel should stay open");
+        assert_eq!(log.error_code, None);
     }
 }

@@ -1,8 +1,12 @@
 import { AlertTriangle, Lightbulb } from "lucide-react";
 import { Card } from "../../ui/Card";
-import { getGatewayErrorShortLabel } from "../../constants/gatewayErrorCodes";
+import {
+  GatewayErrorDescriptions,
+  getGatewayErrorShortLabel,
+} from "../../constants/gatewayErrorCodes";
 import type { RequestLogErrorObservation } from "./requestLogErrorDetails";
 import { DisclosureSection } from "./DisclosureSection";
+import { formatCircuitRecovery } from "../../utils/formatters";
 
 export type RequestLogErrorObservationCardProps = {
   observation: RequestLogErrorObservation | null;
@@ -18,6 +22,18 @@ export function RequestLogErrorObservationCard({
     : null;
   const desc = observation.gwDescription?.desc ?? null;
   const suggestion = observation.gwDescription?.suggestion ?? null;
+  const fallbackTitle = resolveFallbackTitle(observation);
+
+  const failureSummary =
+    observation.attemptFailureSummary && observation.attemptFailureSummary.length > 0
+      ? observation.attemptFailureSummary
+      : null;
+  const dominantGroup = failureSummary?.[0] ?? null;
+  const dominantSuggestion =
+    dominantGroup && dominantGroup.errorCode !== observation.displayErrorCode
+      ? (GatewayErrorDescriptions[dominantGroup.errorCode as keyof typeof GatewayErrorDescriptions]
+          ?.suggestion ?? null)
+      : null;
 
   const detailFields = buildDetailFields(observation);
   const hasDetails =
@@ -40,18 +56,15 @@ export function RequestLogErrorObservationCard({
                     : observation.displayErrorCode}
                 </span>
               ) : null}
-              {desc ? (
-                <span className="text-sm font-medium text-slate-800 dark:text-slate-200">
-                  {desc}
-                </span>
-              ) : null}
+              {desc ? <span className="text-sm font-medium text-foreground">{desc}</span> : null}
             </div>
 
             {/* Reason text (if no desc available, show reason as primary text) */}
             {!desc && observation.reason ? (
-              <p className="mt-1 text-sm text-slate-700 dark:text-slate-300">
-                {observation.reason}
-              </p>
+              <p className="mt-1 text-sm text-secondary-foreground">{observation.reason}</p>
+            ) : null}
+            {!desc && !observation.reason && fallbackTitle ? (
+              <p className="text-sm font-medium text-foreground">{fallbackTitle}</p>
             ) : null}
           </div>
         </div>
@@ -61,6 +74,34 @@ export function RequestLogErrorObservationCard({
           <div className="flex items-start gap-2 rounded-lg bg-amber-50/60 px-3 py-2 dark:bg-amber-900/15">
             <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
             <p className="text-xs text-amber-800 dark:text-amber-300">{suggestion}</p>
+          </div>
+        ) : null}
+
+        {/* Failure attempt summary (grouped by structured error_code) */}
+        {failureSummary ? (
+          <div className="space-y-1">
+            <div className="text-xs font-medium text-muted-foreground">失败尝试</div>
+            {failureSummary.map((group) => (
+              <div key={group.errorCode} className="text-xs text-secondary-foreground">
+                {getGatewayErrorShortLabel(group.errorCode)} ×{group.count}（
+                {group.providerNames.join("、")}
+                {group.timeoutSecs != null ? `，${group.timeoutSecs} 秒` : ""}）
+                {group.circuitTriggerErrorCode
+                  ? ` 触发：${getGatewayErrorShortLabel(group.circuitTriggerErrorCode)}`
+                  : ""}
+                {group.circuitRecoverAtUnix != null
+                  ? `，${formatCircuitRecovery(group.circuitRecoverAtUnix)}`
+                  : ""}
+              </div>
+            ))}
+          </div>
+        ) : null}
+
+        {/* Dominant failure-code suggestion when it differs from the displayed terminal code */}
+        {dominantSuggestion ? (
+          <div className="flex items-start gap-2 rounded-lg bg-amber-50/60 px-3 py-2 dark:bg-amber-900/15">
+            <Lightbulb className="mt-0.5 h-3.5 w-3.5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <p className="text-xs text-amber-800 dark:text-amber-300">{dominantSuggestion}</p>
           </div>
         ) : null}
 
@@ -74,10 +115,8 @@ export function RequestLogErrorObservationCard({
 
               {observation.upstreamBodyPreview ? (
                 <div>
-                  <div className="mb-1 text-xs font-medium text-slate-500 dark:text-slate-400">
-                    上游响应预览
-                  </div>
-                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-100 px-2.5 py-2 text-xs font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">上游响应预览</div>
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-secondary px-2.5 py-2 text-xs font-mono text-secondary-foreground dark:bg-secondary dark:text-secondary-foreground">
                     {observation.upstreamBodyPreview.length > 500
                       ? `${observation.upstreamBodyPreview.slice(0, 500)}…`
                       : observation.upstreamBodyPreview}
@@ -87,10 +126,8 @@ export function RequestLogErrorObservationCard({
 
               {observation.rawDetailsText && !observation.upstreamBodyPreview ? (
                 <div>
-                  <div className="mb-1 text-xs font-medium text-slate-500 dark:text-slate-400">
-                    原始错误信息
-                  </div>
-                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-slate-100 px-2.5 py-2 text-xs font-mono text-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                  <div className="mb-1 text-xs font-medium text-muted-foreground">原始错误信息</div>
+                  <pre className="max-h-40 overflow-auto whitespace-pre-wrap break-all rounded-md bg-secondary px-2.5 py-2 text-xs font-mono text-secondary-foreground dark:bg-secondary dark:text-secondary-foreground">
                     {observation.rawDetailsText.length > 500
                       ? `${observation.rawDetailsText.slice(0, 500)}…`
                       : observation.rawDetailsText}
@@ -108,13 +145,31 @@ export function RequestLogErrorObservationCard({
 function DetailRow({ label, value }: { label: string; value: string }) {
   return (
     <div className="flex items-baseline gap-2 text-xs">
-      <span className="shrink-0 text-slate-500 dark:text-slate-400">{label}:</span>
-      <span className="font-mono text-slate-700 dark:text-slate-300">{value}</span>
+      <span className="shrink-0 text-muted-foreground">{label}:</span>
+      <span className="font-mono text-secondary-foreground">{value}</span>
     </div>
   );
 }
 
 type DetailField = { label: string; value: string };
+
+function resolveFallbackTitle(obs: RequestLogErrorObservation): string | null {
+  if (obs.upstreamStatus != null) {
+    return `HTTP ${obs.upstreamStatus} 响应异常`;
+  }
+  if (
+    obs.errorCategory ||
+    obs.decision ||
+    obs.selectionMethod ||
+    obs.reasonCode ||
+    obs.matchedRule ||
+    obs.outcome ||
+    obs.rawDetailsText
+  ) {
+    return "请求异常详情";
+  }
+  return null;
+}
 
 function buildDetailFields(obs: RequestLogErrorObservation): DetailField[] {
   const fields: DetailField[] = [];

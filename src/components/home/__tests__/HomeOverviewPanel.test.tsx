@@ -2,10 +2,17 @@ import { fireEvent, render, screen } from "@testing-library/react";
 import { useState, type ComponentProps, type ReactNode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { HomeOverviewPanel } from "../HomeOverviewPanel";
+import type {
+  HomeCliWorkspaceConfig,
+  HomeWorkspaceConfigItem,
+  HomeWorkspaceConfigItemType,
+} from "../homeWorkspaceConfigTypes";
 
 const { homeRequestLogsPanelMock } = vi.hoisted(() => ({
   homeRequestLogsPanelMock: vi.fn(() => <div>request-logs</div>),
 }));
+
+const TEST_NOW_SECONDS = 1_764_000_000;
 
 vi.mock("../HomeUsageSection", () => ({
   HomeUsageSection: ({
@@ -21,16 +28,6 @@ vi.mock("../HomeTodayProviderUsageOverview", () => ({
   HomeTodayProviderUsageOverview: ({ devPreviewEnabled }: { devPreviewEnabled?: boolean }) => (
     <div>{`today-provider-usage:${String(Boolean(devPreviewEnabled))}`}</div>
   ),
-}));
-
-vi.mock("../HomeWorkStatusCard", () => ({
-  HomeWorkStatusCard: ({
-    layout,
-    sortModes,
-  }: {
-    layout: string;
-    sortModes?: Array<{ id: number; name: string }>;
-  }) => <div>{`work-status-card:${layout}:${String(sortModes != null)}`}</div>,
 }));
 
 vi.mock("../HomeActiveSessionsCard", () => ({
@@ -86,6 +83,8 @@ vi.mock("../HomeWorkspaceConfigPanel", () => ({
       cliKey: "claude" | "codex" | "gemini";
       cliLabel: string;
       workspaceName: string | null;
+      workspaceId: number | null;
+      workspaces: Array<{ id: number; name: string; isActive: boolean }>;
       items: Array<{ id: string; name: string }>;
     }>;
     selectedCliKey: "claude" | "codex" | "gemini" | null;
@@ -127,13 +126,68 @@ vi.mock("../HomeRequestLogsPanel", () => ({
   HomeRequestLogsPanel: homeRequestLogsPanelMock,
 }));
 
-function renderPanel(overrides: Partial<ComponentProps<typeof HomeOverviewPanel>> = {}) {
+function makeWorkspaceItem(
+  id: number,
+  type: HomeWorkspaceConfigItemType,
+  label: string,
+  name: string,
+  enabled = true
+): HomeWorkspaceConfigItem {
+  const prefix = type === "prompts" ? "prompt" : type === "mcp" ? "mcp" : "skill";
+  return {
+    id: `${prefix}:${id}`,
+    resourceId: id,
+    type,
+    label,
+    name,
+    enabled,
+  };
+}
+
+function makeWorkspaceConfig(input: {
+  cliKey: "claude" | "codex" | "gemini";
+  cliLabel: string;
+  workspaceId: number | null;
+  workspaceName: string | null;
+  items?: HomeWorkspaceConfigItem[];
+}): HomeCliWorkspaceConfig {
+  return {
+    ...input,
+    workspaces:
+      input.workspaceId == null
+        ? []
+        : [
+            {
+              id: input.workspaceId,
+              name: input.workspaceName?.trim() || "默认",
+              isActive: true,
+            },
+          ],
+    loading: false,
+    items: input.items ?? [],
+  };
+}
+
+type HomeOverviewPanelTestOverrides = Omit<
+  Partial<ComponentProps<typeof HomeOverviewPanel>>,
+  "displayOptions"
+> & {
+  displayOptions?: Partial<ComponentProps<typeof HomeOverviewPanel>["displayOptions"]>;
+};
+
+function renderPanel(overrides: HomeOverviewPanelTestOverrides = {}) {
   const onResetCircuitProvider = vi.fn();
   const onSetCliActiveMode = vi.fn();
+  const { displayOptions, ...panelOverrides } = overrides;
   const view = render(
     <HomeOverviewPanel
-      showCustomTooltip={false}
-      showHomeHeatmap={true}
+      displayOptions={{
+        customTooltip: false,
+        heatmap: true,
+        usage: true,
+        workspaceConfigQuickToggle: false,
+        ...displayOptions,
+      }}
       cliPriorityOrder={["claude", "codex", "gemini"]}
       usageWindowDays={15}
       usageHeatmapRows={[]}
@@ -142,43 +196,31 @@ function renderPanel(overrides: Partial<ComponentProps<typeof HomeOverviewPanel>
       sortModes={[]}
       sortModesLoading={false}
       sortModesAvailable={true}
-      activeModeByCli={{ claude: null, codex: null, gemini: null }}
-      activeModeToggling={{ claude: false, codex: false, gemini: false }}
+      activeModeByCli={{ claude: null, codex: null, gemini: null, grok: null }}
+      activeModeToggling={{ claude: false, codex: false, gemini: false, grok: false }}
       onSetCliActiveMode={onSetCliActiveMode}
-      cliProxyLoading={false}
-      cliProxyAvailable={true}
-      cliProxyEnabled={{ claude: false, codex: false, gemini: false }}
-      cliProxyAppliedToCurrentGateway={{ claude: null, codex: null, gemini: null }}
-      cliProxyToggling={{ claude: false, codex: false, gemini: false }}
-      onSetCliProxyEnabled={vi.fn()}
       activeSessions={[]}
       activeSessionsLoading={false}
       activeSessionsAvailable={true}
       workspaceConfigs={[
-        {
+        makeWorkspaceConfig({
           cliKey: "claude",
-          cliLabel: "Claude Code",
+          cliLabel: "Claude",
           workspaceId: 1,
           workspaceName: "默认",
-          loading: false,
-          items: [],
-        },
-        {
+        }),
+        makeWorkspaceConfig({
           cliKey: "codex",
           cliLabel: "Codex",
           workspaceId: 2,
           workspaceName: "Default",
-          loading: false,
-          items: [],
-        },
-        {
+        }),
+        makeWorkspaceConfig({
           cliKey: "gemini",
           cliLabel: "Gemini",
           workspaceId: 3,
           workspaceName: "工作区 2",
-          loading: false,
-          items: [],
-        },
+        }),
       ]}
       providerLimitRows={[]}
       providerLimitLoading={false}
@@ -203,7 +245,7 @@ function renderPanel(overrides: Partial<ComponentProps<typeof HomeOverviewPanel>
       selectedLogId={null}
       onSelectLogId={vi.fn()}
       personalizedUsageView="summary"
-      {...overrides}
+      {...panelOverrides}
     />
   );
 
@@ -225,8 +267,8 @@ describe("components/home/HomeOverviewPanel", () => {
     expect(screen.getByText("Gemini Mirror")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "预览熔断样式" })).not.toBeInTheDocument();
 
-    expect(screen.getAllByRole("button", { name: "解除熔断" })[0]).toBeDisabled();
-    fireEvent.click(screen.getAllByRole("button", { name: "解除熔断" })[0]);
+    expect(screen.getAllByRole("button", { name: "解除" })[0]).toBeDisabled();
+    fireEvent.click(screen.getAllByRole("button", { name: "解除" })[0]);
     expect(screen.getByText("Claude Main")).toBeInTheDocument();
     expect(onResetCircuitProvider).not.toHaveBeenCalled();
   });
@@ -238,6 +280,7 @@ describe("components/home/HomeOverviewPanel", () => {
           cli_key: "claude",
           provider_id: 7,
           provider_name: "Real Claude Provider",
+          displayState: "open" as const,
           open_until: Math.floor(Date.now() / 1000) + 60,
         },
       ],
@@ -247,7 +290,7 @@ describe("components/home/HomeOverviewPanel", () => {
     expect(screen.getByText("Real Claude Provider")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "预览熔断样式" })).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "解除熔断" }));
+    fireEvent.click(screen.getByRole("button", { name: "解除" }));
     expect(onResetCircuitProvider).toHaveBeenCalledWith(7);
   });
 
@@ -262,42 +305,39 @@ describe("components/home/HomeOverviewPanel", () => {
   it("shows workspace config pills and allows switching sort mode for the selected cli", async () => {
     const { onSetCliActiveMode } = renderPanel({
       sortModes: [{ id: 1, name: "工作策略", created_at: 1, updated_at: 1 }],
-      activeModeByCli: { claude: 1, codex: null, gemini: null },
+      activeModeByCli: { claude: 1, codex: null, gemini: null, grok: null },
       workspaceConfigs: [
-        {
+        makeWorkspaceConfig({
           cliKey: "claude",
-          cliLabel: "Claude Code",
+          cliLabel: "Claude",
           workspaceId: 1,
           workspaceName: "工作区 A",
-          loading: false,
           items: [
-            { id: "prompt:1", type: "prompts", label: "Prompt", name: "默认提示词" },
-            { id: "mcp:1", type: "mcp", label: "MCP", name: "filesystem" },
+            makeWorkspaceItem(1, "prompts", "Prompt", "默认提示词"),
+            makeWorkspaceItem(1, "mcp", "MCP", "filesystem"),
           ],
-        },
-        {
+        }),
+        makeWorkspaceConfig({
           cliKey: "codex",
           cliLabel: "Codex",
           workspaceId: 2,
           workspaceName: "Default",
-          loading: false,
-          items: [{ id: "skill:1", type: "skills", label: "Skill", name: "code-review" }],
-        },
-        {
+          items: [makeWorkspaceItem(1, "skills", "Skill", "code-review")],
+        }),
+        makeWorkspaceConfig({
           cliKey: "gemini",
           cliLabel: "Gemini",
           workspaceId: 3,
           workspaceName: "工作区 B",
-          loading: false,
           items: [],
-        },
+        }),
       ],
     });
 
     fireEvent.click(screen.getByRole("tab", { name: "配置信息" }));
-    expect(await screen.findByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Claude" })).toBeInTheDocument();
     expect(screen.getByText("工作区 A")).toBeInTheDocument();
-    expect(screen.getByRole("combobox", { name: "Claude Code 路由策略" })).toHaveValue("1");
+    expect(screen.getByRole("combobox", { name: "Claude 路由策略" })).toHaveValue("1");
     expect(screen.getByRole("option", { name: "工作策略" })).toBeInTheDocument();
     expect(screen.getByText("默认提示词")).toBeInTheDocument();
     expect(screen.getByText("filesystem")).toBeInTheDocument();
@@ -312,61 +352,62 @@ describe("components/home/HomeOverviewPanel", () => {
     expect(onSetCliActiveMode).toHaveBeenCalledWith("codex", 1);
   });
 
-  it("moves the route strategy entry into the work status card in logs-primary layout", async () => {
+  it("renders route strategy in the workspace header in logs-primary layout", async () => {
     window.localStorage.setItem("aio-home-overview-logs-primary-layout", "true");
 
-    renderPanel({
+    const { onSetCliActiveMode } = renderPanel({
       sortModes: [{ id: 1, name: "工作策略", created_at: 1, updated_at: 1 }],
-      activeModeByCli: { claude: 1, codex: null, gemini: null },
+      activeModeByCli: { claude: 1, codex: null, gemini: null, grok: null },
     });
-
-    expect(screen.getByText("work-status-card:vertical:true")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("tab", { name: "配置信息" }));
     expect(await screen.findByText("工作区：")).toBeInTheDocument();
-    expect(screen.queryByText("路由策略：")).not.toBeInTheDocument();
-    expect(
-      screen.queryByRole("combobox", { name: "Claude Code 路由策略" })
-    ).not.toBeInTheDocument();
+    expect(screen.getByText("路由策略：")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "Claude 路由策略" })).toHaveValue("1");
+
+    fireEvent.click(screen.getByRole("button", { name: "Codex" }));
+    expect(screen.getByRole("combobox", { name: "Codex 路由策略" })).toHaveValue("");
+
+    fireEvent.change(screen.getByRole("combobox", { name: "Codex 路由策略" }), {
+      target: { value: "1" },
+    });
+    expect(onSetCliActiveMode).toHaveBeenCalledWith("codex", 1);
   });
 
   it("uses CLI priority order for workspace config button order and default selection", async () => {
     renderPanel({
       cliPriorityOrder: ["gemini", "codex", "claude"],
       workspaceConfigs: [
-        {
+        makeWorkspaceConfig({
           cliKey: "claude",
-          cliLabel: "Claude Code",
+          cliLabel: "Claude",
           workspaceId: 1,
           workspaceName: "工作区 A",
-          loading: false,
-          items: [{ id: "prompt:1", type: "prompts", label: "Prompt", name: "Claude Prompt" }],
-        },
-        {
+          items: [makeWorkspaceItem(1, "prompts", "Prompt", "Claude Prompt")],
+        }),
+        makeWorkspaceConfig({
           cliKey: "codex",
           cliLabel: "Codex",
           workspaceId: 2,
           workspaceName: "工作区 B",
-          loading: false,
-          items: [{ id: "prompt:2", type: "prompts", label: "Prompt", name: "Codex Prompt" }],
-        },
-        {
+          items: [makeWorkspaceItem(2, "prompts", "Prompt", "Codex Prompt")],
+        }),
+        makeWorkspaceConfig({
           cliKey: "gemini",
           cliLabel: "Gemini",
           workspaceId: 3,
           workspaceName: "工作区 C",
-          loading: false,
-          items: [{ id: "prompt:3", type: "prompts", label: "Prompt", name: "Gemini Prompt" }],
-        },
+          items: [makeWorkspaceItem(3, "prompts", "Prompt", "Gemini Prompt")],
+        }),
       ],
     });
 
     fireEvent.click(screen.getByRole("tab", { name: "配置信息" }));
     expect(
       screen
-        .getAllByRole("button", { name: /Claude Code|Codex|Gemini/ })
+        .getAllByRole("button", { name: /Claude|Codex|Gemini/ })
         .map((button) => button.textContent)
-    ).toEqual(["Gemini", "Codex", "Claude Code"]);
+    ).toEqual(["Gemini", "Codex", "Claude"]);
     expect(await screen.findByText("工作区 C")).toBeInTheDocument();
     expect(screen.getByText("Gemini Prompt")).toBeInTheDocument();
   });
@@ -375,7 +416,7 @@ describe("components/home/HomeOverviewPanel", () => {
     renderPanel({ workspaceConfigs: [], devPreviewEnabled: true });
 
     fireEvent.click(screen.getByRole("tab", { name: "配置信息" }));
-    expect(await screen.findByRole("button", { name: "Claude Code" })).toBeInTheDocument();
+    expect(await screen.findByRole("button", { name: "Claude" })).toBeInTheDocument();
     expect(screen.getByText("工作区 Alpha")).toBeInTheDocument();
     expect(screen.getByText("PR Review")).toBeInTheDocument();
     expect(screen.getByText("filesystem")).toBeInTheDocument();
@@ -385,30 +426,27 @@ describe("components/home/HomeOverviewPanel", () => {
     renderPanel({
       devPreviewEnabled: true,
       workspaceConfigs: [
-        {
+        makeWorkspaceConfig({
           cliKey: "claude",
-          cliLabel: "Claude Code",
+          cliLabel: "Claude",
           workspaceId: 1,
           workspaceName: "工作区 A",
-          loading: false,
-          items: [{ id: "prompt:1", type: "prompts", label: "Prompt", name: "默认提示词" }],
-        },
-        {
+          items: [makeWorkspaceItem(1, "prompts", "Prompt", "默认提示词")],
+        }),
+        makeWorkspaceConfig({
           cliKey: "codex",
           cliLabel: "Codex",
           workspaceId: 2,
           workspaceName: "Default",
-          loading: false,
           items: [],
-        },
-        {
+        }),
+        makeWorkspaceConfig({
           cliKey: "gemini",
           cliLabel: "Gemini",
           workspaceId: 3,
           workspaceName: "工作区 B",
-          loading: false,
           items: [],
-        },
+        }),
       ],
     });
 
@@ -420,25 +458,22 @@ describe("components/home/HomeOverviewPanel", () => {
     expect(screen.getByText("code-review")).toBeInTheDocument();
   });
 
-  it("renders only the horizontal proxy status card when both heatmap and usage are hidden", () => {
-    renderPanel({ showHomeHeatmap: false, showHomeUsage: false });
+  it("omits the legacy top metrics row when both heatmap and usage are hidden", () => {
+    renderPanel({ displayOptions: { heatmap: false, usage: false } });
 
     expect(screen.queryByText(/usage-section:/)).not.toBeInTheDocument();
-    expect(screen.getByText("work-status-card:horizontal:false")).toBeInTheDocument();
   });
 
-  it("uses the split layout with usage statistics when heatmap is hidden", () => {
-    renderPanel({ showHomeHeatmap: false, showHomeUsage: true });
+  it("renders usage statistics when heatmap is hidden", () => {
+    renderPanel({ displayOptions: { heatmap: false, usage: true } });
 
     expect(screen.getByText("usage-section:false:true")).toBeInTheDocument();
-    expect(screen.getByText("work-status-card:vertical:false")).toBeInTheDocument();
   });
 
-  it("uses the split layout with heatmap when usage statistics are hidden", () => {
-    renderPanel({ showHomeHeatmap: true, showHomeUsage: false });
+  it("renders the heatmap when usage statistics are hidden", () => {
+    renderPanel({ displayOptions: { heatmap: true, usage: false } });
 
     expect(screen.getByText("usage-section:true:false")).toBeInTheDocument();
-    expect(screen.getByText("work-status-card:vertical:false")).toBeInTheDocument();
   });
 
   it("uses the legacy overview layout by default", () => {
@@ -463,7 +498,6 @@ describe("components/home/HomeOverviewPanel", () => {
     expect(
       usageSection.compareDocumentPosition(requestLogs) & Node.DOCUMENT_POSITION_FOLLOWING
     ).toBeTruthy();
-    expect(screen.getAllByText("work-status-card:vertical:true")).toHaveLength(1);
     expect(screen.getByRole("tab", { name: "配置信息" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "熔断信息" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "供应商限额" })).not.toBeInTheDocument();
@@ -473,18 +507,18 @@ describe("components/home/HomeOverviewPanel", () => {
     ];
     const latestProps = latestCall?.[0];
     expect(latestProps?.compactModeOverride).toBe(true);
-    expect(latestProps?.showCompactModeToggle).toBe(false);
-    expect(latestProps?.showRefreshButton).toBe(false);
+    expect(latestProps?.displayOptions?.compactModeToggle).toBe(false);
+    expect(latestProps?.displayOptions?.refreshButton).toBe(false);
   });
 
-  it("uses proxy-left and usage-plus-logs-right in logs-primary layout", () => {
+  it("does not render proxy controls in logs-primary layout", () => {
     window.localStorage.setItem("aio-home-overview-logs-primary-layout", "true");
 
-    renderPanel({ showHomeHeatmap: true, showHomeUsage: false });
+    renderPanel({ displayOptions: { heatmap: true, usage: false } });
 
-    expect(screen.getByText("today-provider-usage:false")).toBeInTheDocument();
-    expect(screen.getAllByText("work-status-card:vertical:true")).toHaveLength(1);
-    expect(screen.queryByText("work-status-card:horizontal:false")).not.toBeInTheDocument();
+    const usageSummary = screen.getByText("today-provider-usage:false");
+    expect(usageSummary).toBeInTheDocument();
+    expect(screen.queryByText("代理状态")).not.toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "配置信息" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "熔断信息" })).toBeInTheDocument();
     expect(screen.queryByRole("tab", { name: "供应商限额" })).not.toBeInTheDocument();
@@ -577,14 +611,13 @@ describe("components/home/HomeOverviewPanel", () => {
       oauthQuotaVisible: true,
       oauthQuotaRows: [{ providerId: 9 } as any],
       workspaceConfigs: [
-        {
+        makeWorkspaceConfig({
           cliKey: "claude",
-          cliLabel: "Claude Code",
+          cliLabel: "Claude",
           workspaceId: 1,
           workspaceName: "工作区 A",
-          loading: false,
-          items: [{ id: "prompt:1", type: "prompts", label: "Prompt", name: "Claude Prompt" }],
-        },
+          items: [makeWorkspaceItem(1, "prompts", "Prompt", "Claude Prompt")],
+        }),
       ],
     });
 
@@ -593,8 +626,12 @@ describe("components/home/HomeOverviewPanel", () => {
 
     rerender(
       <HomeOverviewPanel
-        showCustomTooltip={false}
-        showHomeHeatmap={true}
+        displayOptions={{
+          customTooltip: false,
+          heatmap: true,
+          usage: true,
+          workspaceConfigQuickToggle: false,
+        }}
         cliPriorityOrder={["claude", "codex", "gemini"]}
         usageWindowDays={15}
         usageHeatmapRows={[]}
@@ -603,27 +640,20 @@ describe("components/home/HomeOverviewPanel", () => {
         sortModes={[]}
         sortModesLoading={false}
         sortModesAvailable={true}
-        activeModeByCli={{ claude: null, codex: null, gemini: null }}
-        activeModeToggling={{ claude: false, codex: false, gemini: false }}
+        activeModeByCli={{ claude: null, codex: null, gemini: null, grok: null }}
+        activeModeToggling={{ claude: false, codex: false, gemini: false, grok: false }}
         onSetCliActiveMode={vi.fn()}
-        cliProxyLoading={false}
-        cliProxyAvailable={true}
-        cliProxyEnabled={{ claude: false, codex: false, gemini: false }}
-        cliProxyAppliedToCurrentGateway={{ claude: null, codex: null, gemini: null }}
-        cliProxyToggling={{ claude: false, codex: false, gemini: false }}
-        onSetCliProxyEnabled={vi.fn()}
         activeSessions={[]}
         activeSessionsLoading={false}
         activeSessionsAvailable={true}
         workspaceConfigs={[
-          {
+          makeWorkspaceConfig({
             cliKey: "claude",
-            cliLabel: "Claude Code",
+            cliLabel: "Claude",
             workspaceId: 1,
             workspaceName: "工作区 A",
-            loading: false,
-            items: [{ id: "prompt:1", type: "prompts", label: "Prompt", name: "Claude Prompt" }],
-          },
+            items: [makeWorkspaceItem(1, "prompts", "Prompt", "Claude Prompt")],
+          }),
         ]}
         providerLimitRows={[]}
         providerLimitLoading={false}
@@ -664,14 +694,13 @@ describe("components/home/HomeOverviewPanel", () => {
 
     renderPanel({
       workspaceConfigs: [
-        {
+        makeWorkspaceConfig({
           cliKey: "claude",
-          cliLabel: "Claude Code",
+          cliLabel: "Claude",
           workspaceId: 1,
           workspaceName: "工作区 A",
-          loading: false,
-          items: [{ id: "prompt:1", type: "prompts", label: "Prompt", name: "Claude Prompt" }],
-        },
+          items: [makeWorkspaceItem(1, "prompts", "Prompt", "Claude Prompt")],
+        }),
       ],
     });
 
@@ -692,8 +721,12 @@ describe("components/home/HomeOverviewPanel", () => {
             switch-to-usage-chart
           </button>
           <HomeOverviewPanel
-            showCustomTooltip={false}
-            showHomeHeatmap={true}
+            displayOptions={{
+              customTooltip: false,
+              heatmap: true,
+              usage: true,
+              workspaceConfigQuickToggle: false,
+            }}
             cliPriorityOrder={["claude", "codex", "gemini"]}
             usageWindowDays={15}
             usageHeatmapRows={[]}
@@ -702,43 +735,34 @@ describe("components/home/HomeOverviewPanel", () => {
             sortModes={[]}
             sortModesLoading={false}
             sortModesAvailable={true}
-            activeModeByCli={{ claude: null, codex: null, gemini: null }}
-            activeModeToggling={{ claude: false, codex: false, gemini: false }}
+            activeModeByCli={{ claude: null, codex: null, gemini: null, grok: null }}
+            activeModeToggling={{ claude: false, codex: false, gemini: false, grok: false }}
             onSetCliActiveMode={vi.fn()}
-            cliProxyLoading={false}
-            cliProxyAvailable={true}
-            cliProxyEnabled={{ claude: false, codex: false, gemini: false }}
-            cliProxyAppliedToCurrentGateway={{ claude: null, codex: null, gemini: null }}
-            cliProxyToggling={{ claude: false, codex: false, gemini: false }}
-            onSetCliProxyEnabled={vi.fn()}
             activeSessions={[]}
             activeSessionsLoading={false}
             activeSessionsAvailable={true}
             workspaceConfigs={[
-              {
+              makeWorkspaceConfig({
                 cliKey: "claude",
-                cliLabel: "Claude Code",
+                cliLabel: "Claude",
                 workspaceId: 1,
                 workspaceName: "默认",
-                loading: false,
                 items: [],
-              },
-              {
+              }),
+              makeWorkspaceConfig({
                 cliKey: "codex",
                 cliLabel: "Codex",
                 workspaceId: 2,
                 workspaceName: "Default",
-                loading: false,
                 items: [],
-              },
-              {
+              }),
+              makeWorkspaceConfig({
                 cliKey: "gemini",
                 cliLabel: "Gemini",
                 workspaceId: 3,
                 workspaceName: "工作区 2",
-                loading: false,
                 items: [],
-              },
+              }),
             ]}
             providerLimitRows={[]}
             providerLimitLoading={false}
@@ -829,8 +853,12 @@ describe("components/home/HomeOverviewPanel", () => {
 
     rerender(
       <HomeOverviewPanel
-        showCustomTooltip={false}
-        showHomeHeatmap={true}
+        displayOptions={{
+          customTooltip: false,
+          heatmap: true,
+          usage: true,
+          workspaceConfigQuickToggle: false,
+        }}
         cliPriorityOrder={["claude", "codex", "gemini"]}
         usageWindowDays={15}
         usageHeatmapRows={[]}
@@ -839,15 +867,9 @@ describe("components/home/HomeOverviewPanel", () => {
         sortModes={[]}
         sortModesLoading={false}
         sortModesAvailable={true}
-        activeModeByCli={{ claude: null, codex: null, gemini: null }}
-        activeModeToggling={{ claude: false, codex: false, gemini: false }}
+        activeModeByCli={{ claude: null, codex: null, gemini: null, grok: null }}
+        activeModeToggling={{ claude: false, codex: false, gemini: false, grok: false }}
         onSetCliActiveMode={vi.fn()}
-        cliProxyLoading={false}
-        cliProxyAvailable={true}
-        cliProxyEnabled={{ claude: false, codex: false, gemini: false }}
-        cliProxyAppliedToCurrentGateway={{ claude: null, codex: null, gemini: null }}
-        cliProxyToggling={{ claude: false, codex: false, gemini: false }}
-        onSetCliProxyEnabled={vi.fn()}
         activeSessions={[]}
         activeSessionsLoading={false}
         activeSessionsAvailable={true}
@@ -868,7 +890,8 @@ describe("components/home/HomeOverviewPanel", () => {
             cli_key: "claude",
             provider_id: 9,
             provider_name: "Claude New Circuit",
-            open_until: Math.floor(Date.now() / 1000) + 60,
+            displayState: "open" as const,
+            open_until: TEST_NOW_SECONDS + 60,
           },
         ]}
         onResetCircuitProvider={vi.fn()}
@@ -888,25 +911,30 @@ describe("components/home/HomeOverviewPanel", () => {
     expect(screen.getByText("Claude New Circuit")).toBeInTheDocument();
   });
 
-  it("auto-switches to 配置信息 when open circuits are removed", () => {
+  it("keeps 活跃 Session selected when open circuits are removed", async () => {
     const { rerender } = renderPanel({
       openCircuits: [
         {
           cli_key: "claude",
           provider_id: 9,
           provider_name: "Claude New Circuit",
+          displayState: "open" as const,
           open_until: Math.floor(Date.now() / 1000) + 60,
         },
       ],
     });
 
-    fireEvent.click(screen.getByRole("tab", { name: "供应商限额" }));
-    expect(screen.getByText("provider-limit:0")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("tab", { name: "活跃 Session" }));
+    expect(await screen.findByText("active-sessions:0")).toBeInTheDocument();
 
     rerender(
       <HomeOverviewPanel
-        showCustomTooltip={false}
-        showHomeHeatmap={true}
+        displayOptions={{
+          customTooltip: false,
+          heatmap: true,
+          usage: true,
+          workspaceConfigQuickToggle: false,
+        }}
         cliPriorityOrder={["claude", "codex", "gemini"]}
         usageWindowDays={15}
         usageHeatmapRows={[]}
@@ -915,15 +943,9 @@ describe("components/home/HomeOverviewPanel", () => {
         sortModes={[]}
         sortModesLoading={false}
         sortModesAvailable={true}
-        activeModeByCli={{ claude: null, codex: null, gemini: null }}
-        activeModeToggling={{ claude: false, codex: false, gemini: false }}
+        activeModeByCli={{ claude: null, codex: null, gemini: null, grok: null }}
+        activeModeToggling={{ claude: false, codex: false, gemini: false, grok: false }}
         onSetCliActiveMode={vi.fn()}
-        cliProxyLoading={false}
-        cliProxyAvailable={true}
-        cliProxyEnabled={{ claude: false, codex: false, gemini: false }}
-        cliProxyAppliedToCurrentGateway={{ claude: null, codex: null, gemini: null }}
-        cliProxyToggling={{ claude: false, codex: false, gemini: false }}
-        onSetCliProxyEnabled={vi.fn()}
         activeSessions={[]}
         activeSessionsLoading={false}
         activeSessionsAvailable={true}
@@ -954,7 +976,11 @@ describe("components/home/HomeOverviewPanel", () => {
       />
     );
 
-    expect(screen.getByText("workspace-config:empty")).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "活跃 Session" })).toHaveAttribute(
+      "aria-selected",
+      "true"
+    );
+    expect(await screen.findByText("active-sessions:0")).toBeInTheDocument();
   });
 
   it("switches back to 配置信息 when circuits become empty in logs-primary layout", async () => {
@@ -966,18 +992,18 @@ describe("components/home/HomeOverviewPanel", () => {
           cli_key: "claude",
           provider_id: 9,
           provider_name: "Claude New Circuit",
+          displayState: "open" as const,
           open_until: Math.floor(Date.now() / 1000) + 60,
         },
       ],
       workspaceConfigs: [
-        {
+        makeWorkspaceConfig({
           cliKey: "claude",
-          cliLabel: "Claude Code",
+          cliLabel: "Claude",
           workspaceId: 1,
           workspaceName: "工作区 A",
-          loading: false,
-          items: [{ id: "prompt:1", type: "prompts", label: "Prompt", name: "Claude Prompt" }],
-        },
+          items: [makeWorkspaceItem(1, "prompts", "Prompt", "Claude Prompt")],
+        }),
       ],
     });
 
@@ -986,8 +1012,12 @@ describe("components/home/HomeOverviewPanel", () => {
 
     rerender(
       <HomeOverviewPanel
-        showCustomTooltip={false}
-        showHomeHeatmap={true}
+        displayOptions={{
+          customTooltip: false,
+          heatmap: true,
+          usage: true,
+          workspaceConfigQuickToggle: false,
+        }}
         cliPriorityOrder={["claude", "codex", "gemini"]}
         usageWindowDays={15}
         usageHeatmapRows={[]}
@@ -996,27 +1026,20 @@ describe("components/home/HomeOverviewPanel", () => {
         sortModes={[]}
         sortModesLoading={false}
         sortModesAvailable={true}
-        activeModeByCli={{ claude: null, codex: null, gemini: null }}
-        activeModeToggling={{ claude: false, codex: false, gemini: false }}
+        activeModeByCli={{ claude: null, codex: null, gemini: null, grok: null }}
+        activeModeToggling={{ claude: false, codex: false, gemini: false, grok: false }}
         onSetCliActiveMode={vi.fn()}
-        cliProxyLoading={false}
-        cliProxyAvailable={true}
-        cliProxyEnabled={{ claude: false, codex: false, gemini: false }}
-        cliProxyAppliedToCurrentGateway={{ claude: null, codex: null, gemini: null }}
-        cliProxyToggling={{ claude: false, codex: false, gemini: false }}
-        onSetCliProxyEnabled={vi.fn()}
         activeSessions={[]}
         activeSessionsLoading={false}
         activeSessionsAvailable={true}
         workspaceConfigs={[
-          {
+          makeWorkspaceConfig({
             cliKey: "claude",
-            cliLabel: "Claude Code",
+            cliLabel: "Claude",
             workspaceId: 1,
             workspaceName: "工作区 A",
-            loading: false,
-            items: [{ id: "prompt:1", type: "prompts", label: "Prompt", name: "Claude Prompt" }],
-          },
+            items: [makeWorkspaceItem(1, "prompts", "Prompt", "Claude Prompt")],
+          }),
         ]}
         providerLimitRows={[]}
         providerLimitLoading={false}

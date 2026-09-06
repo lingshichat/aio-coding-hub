@@ -11,8 +11,11 @@ export function SettingsDataManagementCard({
   about,
   dbDiskUsageAvailable,
   dbDiskUsage,
+  requestLogRetentionDays,
   refreshDbDiskUsage,
   openAppDataDir,
+  onCompactDb,
+  compactingDb,
   openClearRequestLogsDialog,
   openResetAllDialog,
   onExportConfig,
@@ -22,8 +25,11 @@ export function SettingsDataManagementCard({
   about: AppAboutInfo | null;
   dbDiskUsageAvailable: AvailableStatus;
   dbDiskUsage: DbDiskUsage | null;
+  requestLogRetentionDays: number | null;
   refreshDbDiskUsage: () => Promise<void>;
   openAppDataDir: () => Promise<void>;
+  onCompactDb: () => Promise<void>;
+  compactingDb: boolean;
   openClearRequestLogsDialog: () => void;
   openResetAllDialog: () => void;
   onExportConfig: () => Promise<void>;
@@ -33,7 +39,7 @@ export function SettingsDataManagementCard({
   return (
     <Card>
       <div className="mb-4 flex items-center justify-between gap-2">
-        <div className="font-semibold text-slate-900 dark:text-slate-100">数据管理</div>
+        <div className="font-semibold text-foreground">数据管理</div>
         <Button
           onClick={() => void openAppDataDir()}
           variant="secondary"
@@ -43,9 +49,9 @@ export function SettingsDataManagementCard({
           打开数据/日志目录
         </Button>
       </div>
-      <div className="divide-y divide-slate-100 dark:divide-slate-700">
+      <div className="divide-y divide-line-subtle">
         <SettingsRow label="数据磁盘占用">
-          <span className="font-mono text-sm text-slate-900 dark:text-slate-100">
+          <span className="font-mono text-sm text-foreground">
             {dbDiskUsageAvailable === "checking"
               ? "加载中…"
               : dbDiskUsageAvailable === "unavailable"
@@ -61,8 +67,27 @@ export function SettingsDataManagementCard({
             刷新
           </Button>
         </SettingsRow>
+        <SettingsRow label="请求日志留存" subtitle="可在「系统设置 → 请求记录保留」中调整">
+          <span className="font-mono text-sm text-foreground">
+            {requestLogRetentionDays === null
+              ? "—"
+              : requestLogRetentionDays === 0
+                ? "永久保留"
+                : `${requestLogRetentionDays} 天`}
+          </span>
+        </SettingsRow>
+        <SettingsRow label="压缩数据库" subtitle="回收已删除记录占用的磁盘空间，不删除数据">
+          <Button
+            onClick={() => void onCompactDb()}
+            variant="secondary"
+            size="sm"
+            disabled={!about || compactingDb}
+          >
+            {compactingDb ? "压缩中…" : "压缩"}
+          </Button>
+        </SettingsRow>
         <SettingsRow label="清理请求日志">
-          <span className="text-xs text-slate-500 dark:text-slate-400">不可撤销</span>
+          <span className="text-xs text-muted-foreground">不可撤销</span>
           <Button
             onClick={openClearRequestLogsDialog}
             variant="warning"
@@ -80,8 +105,8 @@ export function SettingsDataManagementCard({
         </SettingsRow>
         <div className="flex flex-col gap-3 py-3 sm:flex-row sm:items-start sm:justify-between sm:gap-6">
           <div className="min-w-0 sm:flex-1 sm:pr-2">
-            <div className="text-sm text-slate-700 dark:text-slate-300">导出配置</div>
-            <div className="mt-1 text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+            <div className="text-sm text-secondary-foreground">导出配置</div>
+            <div className="mt-1 text-xs leading-relaxed text-muted-foreground">
               导出所有供应商、工作区、提示词、MCP 服务器等配置
             </div>
             <div className="mt-2 inline-flex max-w-full self-start items-center justify-start whitespace-nowrap text-left rounded-full bg-amber-50 px-2.5 py-1 text-[11px] text-amber-800 dark:bg-amber-500/10 dark:text-amber-300 sm:px-3 sm:text-xs">

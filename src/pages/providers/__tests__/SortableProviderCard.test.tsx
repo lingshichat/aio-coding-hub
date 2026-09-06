@@ -1,19 +1,22 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { tauriOpenUrl } from "../../../test/mocks/tauri";
 import { SortableProviderCard, type SortableProviderCardProps } from "../SortableProviderCard";
 import {
   providerOAuthFetchLimits,
+  providerOAuthResetCodexQuota,
   type ProviderSummary,
 } from "../../../services/providers/providers";
 import { createTestQueryClient, createQueryWrapper } from "../../../test/utils/reactQuery";
+
+const sortablePointerDownMock = vi.hoisted(() => vi.fn());
 
 vi.mock("../../../services/consoleLog", () => ({ logToConsole: vi.fn() }));
 vi.mock("../../../services/providers/providers", async () => {
   const actual = await vi.importActual<typeof import("../../../services/providers/providers")>(
     "../../../services/providers/providers"
   );
-  return { ...actual, providerOAuthFetchLimits: vi.fn() };
+  return { ...actual, providerOAuthFetchLimits: vi.fn(), providerOAuthResetCodexQuota: vi.fn() };
 });
 
 vi.mock("../../../services/gateway/gateway", async () => {
@@ -26,7 +29,7 @@ vi.mock("../../../services/gateway/gateway", async () => {
 vi.mock("@dnd-kit/sortable", () => ({
   useSortable: () => ({
     attributes: {},
-    listeners: {},
+    listeners: { onPointerDown: sortablePointerDownMock },
     setNodeRef: () => {},
     transform: null,
     transition: undefined,
@@ -67,9 +70,12 @@ function makeProvider(partial: Partial<ProviderSummary> = {}): ProviderSummary {
     oauth_last_error: null,
     source_provider_id: null,
     bridge_type: null,
+    model_policy_status: "ready",
+    model_policy: { version: 1, mode: "all", modelPatterns: [], mappings: [] },
     api_key_configured: partial.api_key_configured ?? false,
     ...partial,
     stream_idle_timeout_seconds: partial.stream_idle_timeout_seconds ?? null,
+    extension_values: partial.extension_values ?? [],
   };
 }
 
@@ -82,7 +88,6 @@ function renderCard(
     provider,
     circuit: null,
     circuitResetting: false,
-    onToggleEnabled: vi.fn(),
     onResetCircuit: vi.fn(),
     onEdit: vi.fn(),
     onDelete: vi.fn(),
@@ -97,6 +102,52 @@ function renderCard(
 describe("pages/providers/SortableProviderCard", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+  });
+
+  it("shows an invalid policy badge only when the model policy failed to decode", () => {
+    renderCard({ model_policy_status: "invalid", model_policy: null });
+    expect(screen.getByText("策略无效")).toBeInTheDocument();
+
+    cleanup();
+    renderCard();
+    expect(screen.queryByText("策略无效")).not.toBeInTheDocument();
+  });
+
+  it("binds sortable listeners to the provider name drag handle", () => {
+    renderCard();
+
+    const dragHandle = screen.getByRole("button", {
+      name: "拖拽调整 Test Provider 顺序",
+    });
+    expect(dragHandle).toHaveAttribute("title", "拖拽排序");
+
+    fireEvent.pointerDown(dragHandle);
+
+    expect(sortablePointerDownMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders trailing route action in an independent card-edge region", () => {
+    renderCard(
+      {},
+      {
+        trailing: <button type="button">加入</button>,
+      }
+    );
+
+    const trailingAction = screen.getByRole("button", { name: "加入" });
+    const edgeRegion = trailingAction.closest('[data-provider-card-edge-action="true"]');
+    expect(edgeRegion).not.toBeNull();
+    expect(edgeRegion).toHaveClass("w-16");
+    expect(trailingAction).toHaveClass("w-full");
+    expect(trailingAction.closest('[data-provider-card-management-actions="true"]')).toBeNull();
+    expect(trailingAction.closest('[data-provider-card-secondary-actions="true"]')).toBeNull();
+  });
+
+  it("does not render the provider enabled switch on the resource-pool card", () => {
+    renderCard({ enabled: false });
+
+    expect(screen.queryByRole("switch")).not.toBeInTheDocument();
+    expect(screen.queryByText("已关闭")).not.toBeInTheDocument();
   });
 
   it("renders OAuth badge with email", () => {
@@ -149,6 +200,7 @@ describe("pages/providers/SortableProviderCard", () => {
       limit_weekly_text: "200",
       limit_5h_reset_at: null,
       limit_weekly_reset_at: null,
+      reset_credit_available_count: null,
     });
 
     renderCard({
@@ -166,6 +218,7 @@ describe("pages/providers/SortableProviderCard", () => {
       limit_weekly_text: "300",
       limit_5h_reset_at: null,
       limit_weekly_reset_at: null,
+      reset_credit_available_count: null,
     });
 
     renderCard({
@@ -186,6 +239,7 @@ describe("pages/providers/SortableProviderCard", () => {
       limit_weekly_text: "300",
       limit_5h_reset_at: null,
       limit_weekly_reset_at: null,
+      reset_credit_available_count: null,
     });
 
     renderCard({
@@ -211,6 +265,74 @@ describe("pages/providers/SortableProviderCard", () => {
     await waitFor(() => expect(vi.mocked(providerOAuthFetchLimits)).toHaveBeenCalled());
     // React Query queryFn maps null to empty limits; no toast is shown
     expect(screen.queryByText(/5h:/)).not.toBeInTheDocument();
+  });
+
+  it("renders Codex OAuth reset count and confirms before resetting", async () => {
+    vi.mocked(providerOAuthFetchLimits).mockResolvedValue({
+      limit_short_label: "5h",
+      limit_5h_text: "0%",
+      limit_weekly_text: "50%",
+      limit_5h_reset_at: null,
+      limit_weekly_reset_at: null,
+      reset_credit_available_count: 3,
+    });
+    vi.mocked(providerOAuthResetCodexQuota).mockResolvedValue({
+      success: true,
+      code: "ok",
+      windows_reset: 2,
+      refreshed_limits: {
+        limit_short_label: "5h",
+        limit_5h_text: "100%",
+        limit_weekly_text: "100%",
+        limit_5h_reset_at: null,
+        limit_weekly_reset_at: null,
+        reset_credit_available_count: 2,
+      },
+      refresh_error: null,
+    });
+
+    renderCard({
+      id: 88,
+      cli_key: "codex",
+      auth_mode: "oauth",
+      oauth_email: "codex@example.com",
+    });
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "可重置次数: 3(点击重置)" })).toBeInTheDocument()
+    );
+    expect(providerOAuthResetCodexQuota).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "可重置次数: 3(点击重置)" }));
+
+    expect(screen.getByText("使用 1 次 Codex 重置次数刷新该账号额度？")).toBeInTheDocument();
+    expect(providerOAuthResetCodexQuota).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "确认重置" }));
+
+    await waitFor(() => expect(providerOAuthResetCodexQuota).toHaveBeenCalledWith(88));
+    await waitFor(() => expect(screen.getByText("5h: 100%")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "可重置次数: 2(点击重置)" })).toBeInTheDocument();
+  });
+
+  it("does not render reset action for non-Codex OAuth providers", async () => {
+    vi.mocked(providerOAuthFetchLimits).mockResolvedValue({
+      limit_short_label: "短窗",
+      limit_5h_text: "88",
+      limit_weekly_text: "300",
+      limit_5h_reset_at: null,
+      limit_weekly_reset_at: null,
+      reset_credit_available_count: 3,
+    });
+
+    renderCard({
+      id: 89,
+      cli_key: "gemini",
+      auth_mode: "oauth",
+    });
+
+    await waitFor(() => expect(screen.getByText("短窗: 88")).toBeInTheDocument());
+    expect(screen.queryByText(/可重置次数/)).not.toBeInTheDocument();
   });
 
   it("handles fetchLimits error", async () => {
@@ -449,7 +571,7 @@ describe("pages/providers/SortableProviderCard", () => {
     expect(screen.getByText("解除熔断")).toBeInTheDocument();
   });
 
-  it("does not render circuit breaker controls for HALF_OPEN probe state", () => {
+  it("renders amber probe badge with reset control for HALF_OPEN state", () => {
     renderCard(
       {},
       {
@@ -462,7 +584,20 @@ describe("pages/providers/SortableProviderCard", () => {
       }
     );
 
-    expect(screen.queryByTitle("熔断")).not.toBeInTheDocument();
+    // 半开：琥珀“试探恢复中”，无倒计时；解除按钮可见（跳过试探直接恢复）。
+    const badge = screen.getByText("试探恢复中");
+    expect(badge.className).toContain("amber");
+    expect(badge).not.toHaveTextContent(/\d{2}:\d{2}/);
+    expect(screen.queryByText(/^熔断/)).not.toBeInTheDocument();
+    expect(screen.getByText("解除熔断")).toBeInTheDocument();
+  });
+
+  it("does not render a circuit badge when circuit is null", () => {
+    renderCard();
+
+    expect(screen.queryByText(/^熔断/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/^冷却中/)).not.toBeInTheDocument();
+    expect(screen.queryByText("试探恢复中")).not.toBeInTheDocument();
     expect(screen.queryByText("解除熔断")).not.toBeInTheDocument();
   });
 
@@ -483,9 +618,10 @@ describe("pages/providers/SortableProviderCard", () => {
     // The title should contain the formatted timestamp
     const badge = screen.getByTitle(/熔断至/);
     expect(badge).toBeInTheDocument();
+    expect(badge).toHaveTextContent(/^熔断/);
   });
 
-  it("computes unavailableUntil from cooldown_until when not OPEN", () => {
+  it("renders cooldown badge instead of 熔断 when not OPEN", () => {
     const futureTs = Math.floor(Date.now() / 1000) + 600;
     renderCard(
       {},
@@ -499,8 +635,11 @@ describe("pages/providers/SortableProviderCard", () => {
       }
     );
 
-    const badge = screen.getByTitle(/熔断至/);
-    expect(badge).toBeInTheDocument();
+    // 冷却正名：显示“冷却中”而非“熔断”，且解除按钮可见。
+    const badge = screen.getByTitle(/冷却至/);
+    expect(badge).toHaveTextContent(/^冷却中/);
+    expect(screen.queryByText(/^熔断/)).not.toBeInTheDocument();
+    expect(screen.getByText("解除熔断")).toBeInTheDocument();
   });
 
   it("shows terminal launch button when callback provided", () => {
@@ -512,17 +651,6 @@ describe("pages/providers/SortableProviderCard", () => {
     );
 
     expect(screen.getByText("终端启动")).toBeInTheDocument();
-  });
-
-  it("shows validate model button when callback provided", () => {
-    renderCard(
-      {},
-      {
-        onValidateModel: vi.fn(),
-      }
-    );
-
-    expect(screen.getByText("模型验证")).toBeInTheDocument();
   });
 
   it("renders limit chips with fixed daily reset", () => {

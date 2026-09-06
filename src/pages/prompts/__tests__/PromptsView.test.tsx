@@ -12,32 +12,6 @@ import {
 vi.mock("sonner", () => ({ toast: vi.fn() }));
 vi.mock("../../../services/consoleLog", () => ({ logToConsole: vi.fn() }));
 
-// MDXEditor renders contentEditable which lacks a native value setter.
-// Replace with a plain textarea so fireEvent.change works in tests.
-vi.mock("@mdxeditor/editor", () => {
-  function MDXEditor(props: { markdown: string; onChange?: (v: string) => void }) {
-    return (
-      <textarea
-        role="textbox"
-        value={props.markdown}
-        onChange={(e) => props.onChange?.(e.target.value)}
-      />
-    );
-  }
-  return {
-    MDXEditor,
-    headingsPlugin: () => ({}),
-    listsPlugin: () => ({}),
-    quotePlugin: () => ({}),
-    thematicBreakPlugin: () => ({}),
-    markdownShortcutPlugin: () => ({}),
-    toolbarPlugin: () => ({}),
-    BoldItalicUnderlineToggles: () => null,
-    BlockTypeSelect: () => null,
-    ListsToggle: () => null,
-  };
-});
-
 vi.mock("../../../query/prompts", async () => {
   const actual =
     await vi.importActual<typeof import("../../../query/prompts")>("../../../query/prompts");
@@ -51,6 +25,30 @@ vi.mock("../../../query/prompts", async () => {
 });
 
 describe("pages/prompts/PromptsView", () => {
+  it("shows the Grok prompt target path", () => {
+    vi.mocked(usePromptsListQuery).mockReturnValue({
+      data: [],
+      isFetching: false,
+      error: null,
+    } as any);
+    vi.mocked(usePromptUpsertMutation).mockReturnValue({
+      isPending: false,
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(usePromptSetEnabledMutation).mockReturnValue({
+      isPending: false,
+      mutateAsync: vi.fn(),
+    } as any);
+    vi.mocked(usePromptDeleteMutation).mockReturnValue({
+      isPending: false,
+      mutateAsync: vi.fn(),
+    } as any);
+
+    render(<PromptsView workspaceId={1} cliKey="grok" isActiveWorkspace />);
+
+    expect(screen.getByText("启用后会写入 ~/.grok/AGENTS.md")).toBeInTheDocument();
+  });
+
   it("creates, toggles, edits and deletes prompts", async () => {
     const prompt = { id: 1, name: "P1", content: "hello ".repeat(80), enabled: false } as any;
 
@@ -82,14 +80,15 @@ describe("pages/prompts/PromptsView", () => {
     fireEvent.click(screen.getByRole("button", { name: "新增提示词" }));
     const createDialog = within(screen.getByRole("dialog"));
     const [nameInput, contentTextarea] = createDialog.getAllByRole("textbox");
+    const markdownContent = "**Minimum code that solves the problem. Nothing speculative.**";
     fireEvent.change(nameInput, { target: { value: "P2" } });
-    fireEvent.change(contentTextarea, { target: { value: "" } });
+    fireEvent.change(contentTextarea, { target: { value: markdownContent } });
     fireEvent.click(createDialog.getByRole("button", { name: "保存" }));
     await waitFor(() =>
       expect(upsertMutation.mutateAsync).toHaveBeenCalledWith({
         promptId: null,
         name: "P2",
-        content: "",
+        content: markdownContent,
         enabled: false,
       })
     );
@@ -113,7 +112,7 @@ describe("pages/prompts/PromptsView", () => {
 
     const upsertMutation = { isPending: false, mutateAsync: vi.fn() };
     upsertMutation.mutateAsync.mockRejectedValue(
-      new Error("SEC_INVALID_INPUT: prompt name is required")
+      new Error("PROMPT_NAME_REQUIRED: prompt name is required")
     );
     vi.mocked(usePromptUpsertMutation).mockReturnValue(upsertMutation as any);
     vi.mocked(usePromptSetEnabledMutation).mockReturnValue({
@@ -142,7 +141,7 @@ describe("pages/prompts/PromptsView", () => {
     );
   });
 
-  it("covers tauri-only / db constraint / content required save toasts", async () => {
+  it("covers tauri-only / name conflict / db constraint save toasts", async () => {
     vi.mocked(usePromptsListQuery).mockReturnValue({
       data: [],
       isFetching: false,
@@ -152,8 +151,9 @@ describe("pages/prompts/PromptsView", () => {
     const upsertMutation = { isPending: false, mutateAsync: vi.fn() };
     upsertMutation.mutateAsync
       .mockResolvedValueOnce(null)
-      .mockRejectedValueOnce(new Error("DB_CONSTRAINT: prompt name=dup"))
-      .mockRejectedValueOnce(new Error("SEC_INVALID_INPUT: prompt content is required"))
+      .mockRejectedValueOnce(
+        new Error("PROMPT_NAME_CONFLICT: prompt already exists for workspace_id=1, name=dup")
+      )
       .mockRejectedValueOnce(new Error("DB_CONSTRAINT: other"));
     vi.mocked(usePromptUpsertMutation).mockReturnValue(upsertMutation as any);
     vi.mocked(usePromptSetEnabledMutation).mockReturnValue({
@@ -181,14 +181,6 @@ describe("pages/prompts/PromptsView", () => {
     await waitFor(() =>
       expect(vi.mocked(toast)).toHaveBeenCalledWith(
         expect.stringContaining("保存失败：名称重复（同一工作区下名称必须唯一）")
-      )
-    );
-
-    vi.mocked(toast).mockClear();
-    fireEvent.click(dialog.getByRole("button", { name: "保存" }));
-    await waitFor(() =>
-      expect(vi.mocked(toast)).toHaveBeenCalledWith(
-        expect.stringContaining("保存失败：内容不能为空")
       )
     );
 

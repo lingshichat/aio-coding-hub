@@ -1,14 +1,16 @@
 // Usage:
 // - Render in Home page "概览 / 使用记录" area to show up-to-date in-flight traces.
-// - Accepts a list of `TraceSession` candidates; component applies its own visibility + exit animation logic.
+// - Accepts projected realtime cards; visibility is decided by requestActivityProjection.
 
-import { memo, useEffect, useMemo, useState } from "react";
-import { cliBadgeToneStatic, cliShortLabel } from "../../constants/clis";
+import { memo, useMemo } from "react";
+import { cliShortLabel } from "../../constants/clis";
 import { GatewayErrorCodes } from "../../constants/gatewayErrorCodes";
-import { useNowMs } from "../../hooks/useNowMs";
 import type { CliSessionsFolderLookupEntry } from "../../services/cli/cliSessions";
 import type { CliKey } from "../../services/providers/providers";
-import type { TraceSession } from "../../services/gateway/traceStore";
+import type { ProjectedRealtimeCard } from "../../services/gateway/requestActivityProjection";
+import { REALTIME_TRACE_EXIT_START_MS } from "../../services/gateway/requestActivityProjection";
+import { requestLogActiveActivityState } from "../../services/gateway/requestLogState";
+import { hasFailoverFromSegments } from "../../services/gateway/traceRoute";
 import { cn } from "../../utils/cn";
 import {
   computeOutputTokensPerSecond,
@@ -19,21 +21,17 @@ import {
   formatUsd,
   sanitizeTtfbMs,
 } from "../../utils/formatters";
-import { Clock, Server, Loader2, CheckCircle2, XCircle } from "lucide-react";
-import {
-  computeEffectiveInputTokens,
-  computeStatusBadge,
-  FolderBadge,
-  formatClaudeModelMappingText,
-  FreeBadge,
-  getErrorCodeLabel,
-  SessionReuseBadge,
-} from "./HomeLogShared";
+import { Clock, Server, CheckCircle2, XCircle } from "lucide-react";
+import { computeStatusBadge, resolveCacheCreationDisplay } from "./requestLogPresentation";
+import { FolderBadge, FreeBadge, ReasoningEffortBadge, SessionReuseBadge } from "./LogBadges";
+import { formatModelRedirectText } from "./requestLogSpecialSettings";
 import { CliBrandIcon } from "./CliBrandIcon";
+import { getErrorCodeLabel } from "./requestLogErrorLabels";
 
 export type RealtimeTraceCardsProps = {
   folderLookupBySessionKey: Map<string, CliSessionsFolderLookupEntry>;
-  traces: TraceSession[];
+  cards: ProjectedRealtimeCard[];
+  nowMs: number;
   formatUnixSeconds: (ts: number) => string;
   showCustomTooltip: boolean;
 };
@@ -44,66 +42,33 @@ function sessionFolderLookupKey(cliKey: string, sessionId: string | null | undef
   return `${cliKey}:${normalized}`;
 }
 
-const REALTIME_TRACE_EXIT_START_MS = 600;
-const REALTIME_TRACE_EXIT_ANIM_MS = 400;
-const REALTIME_TRACE_EXIT_TOTAL_MS =
-  REALTIME_TRACE_EXIT_START_MS + REALTIME_TRACE_EXIT_ANIM_MS + 100;
-
-/**
- * UI-level safety net: hide traces stuck in "in progress" beyond this threshold.
- * Works independently of traceStore pruning for defense-in-depth.
- */
-const STALE_TRACE_TIMEOUT_MS = 5 * 60 * 1000;
-
 /**
  * When multiple traces complete within this window, they batch-exit together
  * to avoid staggered collapse animations that feel chaotic.
  */
 const BATCH_EXIT_WINDOW_MS = 500;
-
-function shouldKeepRealtimeTraceVisible(trace: TraceSession, nowMs: number): boolean {
-  if (!trace.summary) {
-    return nowMs - trace.last_seen_ms < STALE_TRACE_TIMEOUT_MS;
-  }
-  return Math.max(0, nowMs - trace.last_seen_ms) < REALTIME_TRACE_EXIT_TOTAL_MS;
-}
-
-function shouldUseRealtimeTraceClock(traces: TraceSession[], nowMs: number): boolean {
-  return traces.some((trace) => shouldKeepRealtimeTraceVisible(trace, nowMs));
-}
+const LIVE_METRIC_CARD_BASE =
+  "h-full min-w-0 rounded-lg border px-2.5 py-1.5 transition-all duration-300 hover:scale-[1.01] hover:shadow-trace-card-hover";
+const LIVE_METRIC_CARD_SURFACE =
+  "border-trace-metric-border bg-trace-metric-surface shadow-trace-card";
+const LIVE_METRIC_LABEL =
+  "leading-3 text-[10px] font-bold uppercase tracking-wider text-muted-foreground";
+const LIVE_METRIC_VALUE =
+  "mt-1.5 truncate leading-none font-bold font-mono tracking-tight text-foreground";
+const LIVE_METRIC_STAGE_VALUE =
+  "mt-1.5 truncate font-extrabold leading-none text-page-accent drop-shadow-page-accent";
 
 export const RealtimeTraceCards = memo(function RealtimeTraceCards({
   folderLookupBySessionKey,
-  traces,
+  cards,
+  nowMs,
   formatUnixSeconds,
   showCustomTooltip,
 }: RealtimeTraceCardsProps) {
-  const [clockEnabled, setClockEnabled] = useState(() =>
-    shouldUseRealtimeTraceClock(traces, Date.now())
-  );
-  const clockNowMs = useNowMs(clockEnabled, 250);
-  const nowMs = clockEnabled ? clockNowMs : Date.now();
-
-  useEffect(() => {
-    const nextEnabled = shouldUseRealtimeTraceClock(traces, Date.now());
-    setClockEnabled((current) => (current === nextEnabled ? current : nextEnabled));
-  }, [traces]);
-
-  useEffect(() => {
-    if (!clockEnabled) return;
-    if (shouldUseRealtimeTraceClock(traces, clockNowMs)) return;
-    setClockEnabled(false);
-  }, [clockEnabled, clockNowMs, traces]);
-
-  const visibleTraces = useMemo(() => {
-    const kept = traces.filter((trace) => shouldKeepRealtimeTraceVisible(trace, nowMs));
-    return kept.slice(0, 5);
-  }, [traces, nowMs]);
-
   // Compute a batch-aligned exit threshold: if multiple traces completed within
   // BATCH_EXIT_WINDOW_MS of each other, they all exit when the earliest one would.
   const batchExitThresholdMs = useMemo(() => {
-    const completedTraces = visibleTraces.filter((t) => t.summary);
+    const completedTraces = cards.flatMap((card) => (card.kind === "settling" ? [card.trace] : []));
     if (completedTraces.length <= 1) return null;
     // Find earliest completion
     const earliestLastSeen = Math.min(...completedTraces.map((t) => t.last_seen_ms));
@@ -113,24 +78,24 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
       return earliestLastSeen + REALTIME_TRACE_EXIT_START_MS;
     }
     return null;
-  }, [visibleTraces]);
+  }, [cards]);
 
   return (
     <>
-      {visibleTraces.map((trace) => {
-        const completedAgeMs = trace.summary ? Math.max(0, nowMs - trace.last_seen_ms) : 0;
+      {cards.map((card) => {
+        const trace = card.trace;
+        const summary = card.kind === "settling" ? card.trace.summary : null;
+        const isInProgress = card.kind === "active";
+        const completedAgeMs = summary ? Math.max(0, nowMs - trace.last_seen_ms) : 0;
         const isExiting =
-          Boolean(trace.summary) &&
+          summary != null &&
           (batchExitThresholdMs != null
             ? nowMs >= batchExitThresholdMs
             : completedAgeMs >= REALTIME_TRACE_EXIT_START_MS);
-        const runningMs = trace.summary
-          ? trace.summary.duration_ms
-          : Math.max(0, nowMs - trace.first_seen_ms);
+        const runningMs = summary?.duration_ms ?? Math.max(0, nowMs - trace.first_seen_ms);
 
-        const summaryStatus = trace.summary?.status ?? null;
-        const summaryErrorCode = trace.summary?.error_code ?? null;
-        const isInProgress = !trace.summary;
+        const summaryStatus = summary?.status ?? null;
+        const summaryErrorCode = summary?.error_code ?? null;
 
         const attemptRoute = (() => {
           const sortedAttempts = (trace.attempts ?? [])
@@ -177,9 +142,8 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
           return { providerText, startProvider, endProvider, segments: segs };
         })();
 
-        const hasFailover =
-          attemptRoute.segments.length > 1 ||
-          attemptRoute.segments.some((s) => s.status === "failed");
+        // 与落库后徽章同规则（见 traceRoute.ts，复刻后端 has_failover）。
+        const hasFailover = hasFailoverFromSegments(attemptRoute.segments);
 
         const statusBadge = computeStatusBadge({
           status: summaryStatus,
@@ -195,9 +159,14 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
         const hasSessionReuse = (trace.attempts ?? []).some(
           (attempt) => attempt.session_reuse === true
         );
-        const latestAttempt = (trace.attempts ?? [])
-          .slice()
-          .sort((a, b) => b.attempt_index - a.attempt_index)[0];
+        let latestAttempt: NonNullable<typeof trace.attempts>[number] | undefined;
+        let attemptCount = trace.attempts?.length ?? 0;
+        for (const attempt of trace.attempts ?? []) {
+          attemptCount = Math.max(attemptCount, attempt.attempt_index);
+          if (!latestAttempt || attempt.attempt_index > latestAttempt.attempt_index) {
+            latestAttempt = attempt;
+          }
+        }
 
         const providerText = attemptRoute.providerText;
         const sessionFolder = (() => {
@@ -216,60 +185,28 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
             : `${attemptRoute.startProvider} → ${attemptRoute.endProvider}${extra}`;
         })();
 
-        const modelText = formatClaudeModelMappingText(
+        const modelText = formatModelRedirectText(
           trace.requested_model,
+          trace.model_redirect,
           trace.claude_model_mapping
         );
         const cliLabel = cliShortLabel(trace.cli_key);
-        const cliTone = cliBadgeToneStatic(trace.cli_key);
 
-        const cacheWrite = (() => {
-          const s = trace.summary;
-          if (!s)
-            return {
-              tokens: null as number | null,
-              ttl: null as "5m" | "1h" | null,
-            };
-          // 优先 5m，其次 1h，最后用 cache_creation_input_tokens 汇总
-          if (s.cache_creation_5m_input_tokens != null && s.cache_creation_5m_input_tokens > 0) {
-            return { tokens: s.cache_creation_5m_input_tokens, ttl: "5m" as const };
-          }
-          if (s.cache_creation_1h_input_tokens != null && s.cache_creation_1h_input_tokens > 0) {
-            return { tokens: s.cache_creation_1h_input_tokens, ttl: "1h" as const };
-          }
-          if (s.cache_creation_input_tokens != null && s.cache_creation_input_tokens > 0) {
-            return { tokens: s.cache_creation_input_tokens, ttl: null };
-          }
-          if (s.cache_creation_5m_input_tokens != null) {
-            return { tokens: s.cache_creation_5m_input_tokens, ttl: "5m" as const };
-          }
-          if (s.cache_creation_1h_input_tokens != null) {
-            return { tokens: s.cache_creation_1h_input_tokens, ttl: "1h" as const };
-          }
-          if (s.cache_creation_input_tokens != null) {
-            return { tokens: s.cache_creation_input_tokens, ttl: null };
-          }
-          return { tokens: null as number | null, ttl: null as "5m" | "1h" | null };
-        })();
+        const cacheWrite = summary ? resolveCacheCreationDisplay(summary) : null;
 
-        const ttfbMs = trace.summary
-          ? sanitizeTtfbMs(trace.summary.ttfb_ms ?? null, trace.summary.duration_ms)
+        const ttfbMs = summary
+          ? sanitizeTtfbMs(summary.ttfb_ms ?? null, summary.duration_ms)
           : null;
 
-        const effectiveInputTokens = computeEffectiveInputTokens(
-          trace.cli_key,
-          trace.summary?.input_tokens ?? null,
-          trace.summary?.cache_read_input_tokens ?? null
-        );
+        const effectiveInputTokens = summary?.effective_input_tokens ?? null;
         const displayInputTokens = effectiveInputTokens ?? (isClientAbort ? 0 : null);
-        const displayOutputTokens = trace.summary?.output_tokens ?? (isClientAbort ? 0 : null);
+        const displayOutputTokens = summary?.output_tokens ?? (isClientAbort ? 0 : null);
         const displayCacheReadTokens =
-          trace.summary?.cache_read_input_tokens ?? (isClientAbort ? 0 : null);
-        const displayCacheWriteTokens = cacheWrite.tokens ?? (isClientAbort ? 0 : null);
-        const displayCostUsd = trace.summary?.cost_usd ?? (isClientAbort ? 0 : null);
+          summary?.cache_read_input_tokens ?? (isClientAbort ? 0 : null);
+        const displayCostUsd = summary?.cost_usd ?? (isClientAbort ? 0 : null);
         const displayCostText = displayCostUsd == null ? "—" : formatUsd(displayCostUsd);
         const costMultiplier =
-          typeof trace.summary?.cost_multiplier === "number" ? trace.summary.cost_multiplier : null;
+          typeof summary?.cost_multiplier === "number" ? summary.cost_multiplier : null;
         const isFree = costMultiplier === 0;
         const showCostMultiplier =
           costMultiplier != null && costMultiplier >= 0 && Math.abs(costMultiplier - 1) > 0.0001;
@@ -279,8 +216,8 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
             ? `x${costMultiplier.toFixed(2)}`
             : null;
 
-        const outputTokensPerSecond = trace.summary
-          ? computeOutputTokensPerSecond(displayOutputTokens, trace.summary.duration_ms, ttfbMs)
+        const outputTokensPerSecond = summary
+          ? computeOutputTokensPerSecond(displayOutputTokens, summary.duration_ms, ttfbMs)
           : null;
         const displayOutputTokensPerSecond =
           outputTokensPerSecond ?? (isClientAbort && displayOutputTokens === 0 ? 0 : null);
@@ -297,8 +234,23 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
               ? attemptRoute.segments.map((seg) => seg.provider).join(" → ")
               : null;
         const providerTitle = providerText;
+        const idleMinutes = (() => {
+          if (card.kind !== "active") return null;
+          const activeRequest = card.activeRequest;
+          if (
+            requestLogActiveActivityState(activeRequest.last_activity_ms, nowMs) !==
+            "in_progress_idle"
+          ) {
+            return null;
+          }
+          return Math.max(
+            1,
+            Math.floor(Math.max(0, nowMs - activeRequest.last_activity_ms) / 60_000)
+          );
+        })();
         const liveStageText = (() => {
           if (!isInProgress) return null;
+          if (idleMinutes != null) return `已静默 ${idleMinutes} 分钟`;
           if (!latestAttempt) return "等待首个尝试";
           if (hasFailover) return "切换处理中";
           if (latestAttempt.outcome === "started") return "处理中";
@@ -320,25 +272,12 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
           >
             <div
               className={cn(
-                "group/item relative rounded-lg border transition-colors duration-300 ease-out",
+                "group/item relative rounded-lg border transition-all duration-300 ease-out",
                 isInProgress
-                  ? "bg-white/90 border-indigo-200/80 shadow-[0_0_0_1px_rgba(99,102,241,0.06),0_2px_12px_rgba(99,102,241,0.1)] glow-pulse-active dark:bg-slate-800/90 dark:border-indigo-600/50 dark:shadow-[0_0_0_1px_rgba(99,102,241,0.12),0_2px_12px_rgba(99,102,241,0.15)]"
-                  : "bg-white/80 border-slate-200/60 shadow-sm dark:bg-slate-800/80 dark:border-slate-700/60"
+                  ? "border-border/80 bg-gradient-to-br from-trace-live-from to-trace-live-to shadow-sm hover:scale-[1.005] hover:shadow-trace-panel-live-hover hover:border-border/60"
+                  : "bg-secondary/35 border-border/40 shadow-sm dark:bg-secondary/45 dark:border-border/40 hover:shadow-trace-panel-hover hover:border-border/60 dark:hover:border-border/80 hover:bg-secondary/65 dark:hover:bg-secondary/80 hover:scale-[1.002]"
               )}
             >
-              <div
-                className={cn(
-                  "absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full transition-all duration-500 origin-center",
-                  isInProgress
-                    ? "indicator-shimmer-active shadow-[2px_0_8px_rgba(99,102,241,0.25)]"
-                    : statusBadge.isError
-                      ? "bg-rose-400 opacity-80"
-                      : hasFailover
-                        ? "bg-amber-400 opacity-80"
-                        : "bg-slate-300/60 opacity-50 dark:bg-slate-500/60"
-                )}
-              />
-
               <div className="px-3 py-2.5">
                 <div className="mb-1.5 flex min-w-0 items-center gap-2">
                   <span
@@ -349,7 +288,28 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                     title={statusBadge.title}
                   >
                     {isInProgress ? (
-                      <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                      <div className="h-3 w-3 shrink-0 animate-spin will-change-transform">
+                        <svg
+                          className="h-full w-full text-current"
+                          xmlns="http://www.w3.org/2000/svg"
+                          fill="none"
+                          viewBox="0 0 24 24"
+                        >
+                          <circle
+                            className="opacity-25"
+                            cx="12"
+                            cy="12"
+                            r="10"
+                            stroke="currentColor"
+                            strokeWidth="3"
+                          />
+                          <path
+                            className="opacity-75"
+                            fill="currentColor"
+                            d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"
+                          />
+                        </svg>
+                      </div>
                     ) : statusBadge.isError ? (
                       <XCircle className="h-3 w-3 shrink-0" />
                     ) : (
@@ -359,19 +319,18 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                   </span>
 
                   <span
-                    className={cn(
-                      "inline-flex min-w-0 items-center gap-1 rounded-md px-1.5 py-0.5 text-[11px] font-medium",
-                      cliTone
-                    )}
+                    className="inline-flex min-w-0 items-center gap-1 rounded-md bg-muted/65 px-2 py-0.5 text-[11px] font-medium text-muted-foreground border border-border/40 dark:bg-muted/40 dark:border-border/20 shadow-pill-subtle"
                     title={`${cliLabel} / ${modelText}`}
                   >
                     <CliBrandIcon
                       cliKey={trace.cli_key as CliKey}
-                      className="h-2.5 w-2.5 shrink-0 rounded-[3px] object-contain"
+                      className="h-2.5 w-2.5 shrink-0 rounded-[3px] object-contain opacity-80"
                     />
                     <span className="shrink-0">{cliLabel} /</span>
                     <span className="truncate">{modelText}</span>
                   </span>
+
+                  <ReasoningEffortBadge value={summary?.reasoning_effort} />
 
                   {sessionFolder && (
                     <FolderBadge
@@ -380,49 +339,71 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                     />
                   )}
 
-                  {hasSessionReuse && <SessionReuseBadge showCustomTooltip={showCustomTooltip} />}
-
                   {isFree && <FreeBadge />}
 
                   {summaryErrorCode && (
-                    <span className="shrink-0 rounded-md bg-amber-50/80 px-2 py-0.5 text-[11px] font-semibold text-amber-600 ring-1 ring-inset ring-amber-500/10 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/20">
+                    <span className="shrink-0 rounded-md bg-amber-50/80 px-2 py-0.5 text-[11px] font-semibold text-amber-600 ring-1 ring-inset ring-amber-500/10 dark:bg-amber-500/15 dark:text-amber-300 dark:ring-amber-400/20 shadow-pill-subtle border border-amber-500/10 dark:border-amber-400/10">
                       {getErrorCodeLabel(summaryErrorCode)}
                     </span>
                   )}
 
                   {!isInProgress ? (
-                    <span className="ml-auto flex w-[150px] shrink-0 items-center justify-end gap-1.5 text-xs text-slate-400 dark:text-slate-500 whitespace-nowrap">
-                      <Clock className="h-3 w-3 shrink-0" />
-                      {formatUnixSeconds(Math.floor(trace.first_seen_ms / 1000))}
+                    <span className="ml-auto flex w-[150px] shrink-0 items-center justify-end gap-1.5 text-xs text-muted-foreground whitespace-nowrap">
+                      {hasSessionReuse && (
+                        <SessionReuseBadge showCustomTooltip={showCustomTooltip} />
+                      )}
+                      <span className="flex items-center gap-1 w-[64px] justify-end shrink-0 select-none">
+                        <Clock className="h-3 w-3 shrink-0" />
+                        <span>{formatUnixSeconds(Math.floor(trace.first_seen_ms / 1000))}</span>
+                      </span>
                     </span>
                   ) : (
-                    <span className="ml-auto flex shrink-0 items-center gap-2 whitespace-nowrap">
-                      <span className="inline-flex items-center gap-1.5 text-xs font-mono tabular-nums text-indigo-600 dark:text-indigo-300">
-                        <Clock className="h-3 w-3 shrink-0" />
-                        {formatDurationMs(runningMs)}
+                    <span className="ml-auto flex shrink-0 items-center gap-1.5 whitespace-nowrap">
+                      {hasSessionReuse && (
+                        <SessionReuseBadge showCustomTooltip={showCustomTooltip} />
+                      )}
+                      <span className="flex items-center gap-1 w-[64px] justify-end shrink-0 text-xs font-mono font-semibold tabular-nums text-muted-foreground select-none">
+                        <Clock className="h-3 w-3 shrink-0 text-page-accent/80" />
+                        <span>{formatDurationMs(runningMs)}</span>
                       </span>
                     </span>
                   )}
                 </div>
 
                 {isInProgress ? (
-                  <div className="grid grid-cols-2 gap-2 text-[11px] lg:grid-cols-[fit-content(180px)_fit-content(96px)_minmax(0,1fr)]">
-                    <div className="rounded-md border border-indigo-200/60 bg-indigo-50/70 px-2.5 py-2 dark:border-indigo-500/20 dark:bg-indigo-500/10">
-                      <div className="text-slate-400 dark:text-slate-500">当前阶段</div>
-                      <div className="mt-1 truncate font-semibold text-indigo-600 dark:text-indigo-300">
-                        {liveStageText}
+                  <div className="grid grid-cols-1 gap-2 text-[11px] sm:grid-cols-12">
+                    <div
+                      className={cn(
+                        LIVE_METRIC_CARD_BASE,
+                        LIVE_METRIC_CARD_SURFACE,
+                        "sm:col-span-3 border-page-accent/20 shadow-trace-metric"
+                      )}
+                    >
+                      <div className={LIVE_METRIC_LABEL}>当前阶段</div>
+                      <div className={LIVE_METRIC_STAGE_VALUE}>{liveStageText}</div>
+                    </div>
+                    <div
+                      className={cn(
+                        LIVE_METRIC_CARD_BASE,
+                        LIVE_METRIC_CARD_SURFACE,
+                        "sm:col-span-2"
+                      )}
+                    >
+                      <div className={LIVE_METRIC_LABEL}>尝试次数</div>
+                      <div className={cn(LIVE_METRIC_VALUE, "font-mono tabular-nums")}>
+                        {formatInteger(attemptCount)}
                       </div>
                     </div>
-                    <div className="rounded-md border border-slate-200/70 bg-slate-50/80 px-2.5 py-2 dark:border-slate-700/70 dark:bg-slate-800/70">
-                      <div className="text-slate-400 dark:text-slate-500">尝试次数</div>
-                      <div className="mt-1 truncate font-mono tabular-nums text-slate-700 dark:text-slate-200">
-                        {formatInteger(trace.attempts.length)}
-                      </div>
-                    </div>
-                    <div className="col-span-2 rounded-md border border-slate-200/70 bg-slate-50/80 px-2.5 py-2 dark:border-slate-700/70 dark:bg-slate-800/70 lg:col-span-1">
-                      <div className="text-slate-400 dark:text-slate-500">当前链路</div>
+                    <div
+                      className={cn(
+                        LIVE_METRIC_CARD_BASE,
+                        LIVE_METRIC_CARD_SURFACE,
+                        "sm:col-span-7"
+                      )}
+                    >
+                      <div className={LIVE_METRIC_LABEL}>当前链路</div>
                       <div
-                        className="mt-1 truncate font-medium text-slate-700 dark:text-slate-200"
+                        className={cn(LIVE_METRIC_VALUE, "font-medium")}
                         title={routeTooltipText ?? liveRouteText}
                       >
                         {liveRouteText}
@@ -436,8 +417,8 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                       title={providerTitle}
                     >
                       <div className="flex items-center gap-1 h-4">
-                        <Server className="h-3 w-3 text-slate-400/80 dark:text-slate-500/80 shrink-0" />
-                        <span className="truncate font-semibold text-slate-600 dark:text-slate-300">
+                        <Server className="h-3 w-3 text-muted-foreground/80 dark:text-muted-foreground/80 shrink-0" />
+                        <span className="truncate font-semibold text-muted-foreground dark:text-secondary-foreground">
                           {providerText}
                         </span>
                       </div>
@@ -445,14 +426,14 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                         <div className="flex min-w-0 w-full items-center gap-1">
                           {routeLabel && routeTooltipText ? (
                             <span
-                              className="cursor-help text-[11px] text-slate-400 dark:text-slate-500"
+                              className="cursor-help text-[11px] text-muted-foreground"
                               title={routeTooltipText}
                             >
                               {routeLabel}
                             </span>
                           ) : null}
                           {showCostMultiplier ? (
-                            <span className="inline-flex shrink-0 items-center text-[11px] font-medium text-slate-500 dark:text-slate-400">
+                            <span className="inline-flex shrink-0 items-center text-[11px] font-medium text-muted-foreground">
                               {costMultiplierText}
                             </span>
                           ) : null}
@@ -462,74 +443,70 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
 
                     <div className="grid flex-1 grid-cols-4 gap-x-3 gap-y-0.5 text-slate-500 dark:text-slate-400">
                       <div className="flex items-center gap-1 h-4" title="Input Tokens">
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                        <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
                           输入
                         </span>
-                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 font-semibold truncate">
                           {formatInteger(displayInputTokens)}
                         </span>
                       </div>
-                      <div className="flex items-center gap-1 h-4" title="Cache Write">
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
-                          缓存创建
-                        </span>
-                        {displayCacheWriteTokens != null ? (
-                          <>
-                            <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
-                              {formatInteger(displayCacheWriteTokens)}
+                      {cacheWrite ? (
+                        <div className="flex items-center gap-1 h-4" title="Cache Write">
+                          <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
+                            缓存创建
+                          </span>
+                          <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 font-semibold truncate">
+                            {formatInteger(cacheWrite.tokens)}
+                          </span>
+                          {cacheWrite.ttl && cacheWrite.tokens > 0 ? (
+                            <span className="text-slate-400/70 dark:text-slate-500/70 text-[10px]">
+                              ({cacheWrite.ttl})
                             </span>
-                            {cacheWrite.ttl && displayCacheWriteTokens > 0 && (
-                              <span className="text-slate-400/70 dark:text-slate-500/70 text-[10px]">
-                                ({cacheWrite.ttl})
-                              </span>
-                            )}
-                          </>
-                        ) : (
-                          <span className="text-slate-300/60 dark:text-slate-600/60">—</span>
-                        )}
-                      </div>
+                          ) : null}
+                        </div>
+                      ) : null}
                       <div className="flex items-center gap-1 h-4" title="TTFB">
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                        <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
                           首字
                         </span>
-                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 font-semibold truncate">
                           {ttfbMs != null ? formatDurationMs(ttfbMs) : "—"}
                         </span>
                       </div>
                       <div className="flex items-center gap-1 h-4" title="Cost">
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                        <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
                           花费
                         </span>
-                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                        <span className="font-mono tabular-nums text-slate-800 dark:text-slate-100 font-bold truncate">
                           {displayCostText}
                         </span>
                       </div>
 
                       <div className="flex items-center gap-1 h-4" title="Output Tokens">
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                        <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
                           输出
                         </span>
-                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                        <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 font-semibold truncate">
                           {formatInteger(displayOutputTokens)}
                         </span>
                       </div>
                       <div className="flex items-center gap-1 h-4" title="Cache Read">
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                        <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
                           缓存读取
                         </span>
                         {displayCacheReadTokens != null ? (
-                          <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                          <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 font-semibold truncate">
                             {formatInteger(displayCacheReadTokens)}
                           </span>
                         ) : (
-                          <span className="text-slate-300/60 dark:text-slate-600/60">—</span>
+                          <span className="text-slate-300 dark:text-slate-700">—</span>
                         )}
                       </div>
                       <div className="flex items-center gap-1 h-4" title="Duration">
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                        <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
                           耗时
                         </span>
-                        <span className="font-mono tabular-nums text-slate-600 dark:text-slate-300 truncate">
+                        <span className="font-mono tabular-nums text-slate-500 dark:text-slate-400 font-medium truncate">
                           {formatDurationMs(runningMs)}
                         </span>
                       </div>
@@ -541,15 +518,15 @@ export const RealtimeTraceCards = memo(function RealtimeTraceCards({
                             : undefined
                         }
                       >
-                        <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                        <span className="text-slate-400 dark:text-slate-500 font-medium shrink-0">
                           速率
                         </span>
                         {displayOutputTokensPerSecond != null ? (
-                          <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                          <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 font-semibold truncate">
                             {formatTokensPerSecondShort(displayOutputTokensPerSecond)}
                           </span>
                         ) : (
-                          <span className="text-slate-300/60 dark:text-slate-600/60">—</span>
+                          <span className="text-slate-300 dark:text-slate-700">—</span>
                         )}
                       </div>
                     </div>

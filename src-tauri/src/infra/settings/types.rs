@@ -3,41 +3,32 @@
 use super::defaults::*;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum GatewayListenMode {
+    #[default]
     Localhost,
     WslAuto,
     Lan,
     Custom,
 }
 
-impl Default for GatewayListenMode {
-    fn default() -> Self {
-        Self::Localhost
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum WslHostAddressMode {
+    #[default]
     Auto,
     Custom,
 }
 
-impl Default for WslHostAddressMode {
-    fn default() -> Self {
-        Self::Auto
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type, Default)]
 pub enum HomeUsagePeriod {
     #[serde(rename = "last7")]
     #[specta(rename = "last7")]
     Last7,
     #[serde(rename = "last15")]
     #[specta(rename = "last15")]
+    #[default]
     Last15,
     #[serde(rename = "last30")]
     #[specta(rename = "last30")]
@@ -47,23 +38,29 @@ pub enum HomeUsagePeriod {
     Month,
 }
 
-impl Default for HomeUsagePeriod {
-    fn default() -> Self {
-        Self::Last15
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum CodexHomeMode {
+    #[default]
     UserHomeDefault,
     FollowCodexHome,
     Custom,
 }
 
-impl Default for CodexHomeMode {
-    fn default() -> Self {
-        Self::UserHomeDefault
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, specta::Type, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum CodexPriorityBillingSource {
+    #[default]
+    Requested,
+    Actual,
+}
+
+impl CodexPriorityBillingSource {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Actual => "actual",
+        }
     }
 }
 
@@ -112,6 +109,13 @@ pub struct AppSettings {
     pub codex_home_mode: CodexHomeMode,
     // Optional Codex config directory override. Empty = default resolution.
     pub codex_home_override: String,
+    // Codex CLI proxy OAuth compatible mode. When enabled, proxy takeover
+    // manages config.toml only and leaves auth.json untouched.
+    pub codex_oauth_compatible_proxy_mode: bool,
+    pub grok_proxy_preferences: Option<crate::grok_config::GrokProxyPreferences>,
+    // Image generation storage directory override. None/empty = default
+    // `<app data dir>/image-gen`.
+    pub image_gen_storage_dir: Option<String>,
     pub auto_start: bool,
     // Start with window hidden when auto-starting (silent startup).
     pub start_minimized: bool,
@@ -119,6 +123,8 @@ pub struct AppSettings {
     // Startup crash recovery for CLI proxy takeover (default enabled).
     pub enable_cli_proxy_startup_recovery: bool,
     pub log_retention_days: u32,
+    // Request-log DB retention in days; 0 = keep forever.
+    pub request_log_retention_days: u32,
     pub provider_cooldown_seconds: u32,
     pub provider_base_url_ping_cache_ttl_seconds: u32,
     pub upstream_first_byte_timeout_seconds: u32,
@@ -134,8 +140,12 @@ pub struct AppSettings {
     // CCH-aligned gateway feature toggles.
     pub verbose_provider_error: bool,
     pub intercept_anthropic_warmup_requests: bool,
+    pub enable_thinking_effort_conflict_rectifier: bool,
     pub enable_thinking_signature_rectifier: bool,
     pub enable_thinking_budget_rectifier: bool,
+    pub enable_gemini_function_id_rectifier: bool,
+    pub enable_response_input_rectifier: bool,
+    pub codex_priority_billing_source: CodexPriorityBillingSource,
     // Billing header rectifier: strip x-anthropic-billing-header from system prompt (default enabled).
     pub enable_billing_header_rectifier: bool,
     // Codex Session ID completion (default enabled).
@@ -193,11 +203,15 @@ impl Default for AppSettings {
             wsl_custom_host_address: "127.0.0.1".to_string(),
             codex_home_mode: CodexHomeMode::default(),
             codex_home_override: String::new(),
+            codex_oauth_compatible_proxy_mode: DEFAULT_CODEX_OAUTH_COMPATIBLE_PROXY_MODE,
+            grok_proxy_preferences: None,
+            image_gen_storage_dir: None,
             auto_start: false,
             start_minimized: false,
             tray_enabled: true,
             enable_cli_proxy_startup_recovery: DEFAULT_ENABLE_CLI_PROXY_STARTUP_RECOVERY,
             log_retention_days: DEFAULT_LOG_RETENTION_DAYS,
+            request_log_retention_days: DEFAULT_REQUEST_LOG_RETENTION_DAYS,
             provider_cooldown_seconds: DEFAULT_PROVIDER_COOLDOWN_SECONDS,
             provider_base_url_ping_cache_ttl_seconds:
                 DEFAULT_PROVIDER_BASE_URL_PING_CACHE_TTL_SECONDS,
@@ -213,8 +227,13 @@ impl Default for AppSettings {
             enable_circuit_breaker_notice: DEFAULT_ENABLE_CIRCUIT_BREAKER_NOTICE,
             verbose_provider_error: DEFAULT_VERBOSE_PROVIDER_ERROR,
             intercept_anthropic_warmup_requests: DEFAULT_INTERCEPT_ANTHROPIC_WARMUP_REQUESTS,
+            enable_thinking_effort_conflict_rectifier:
+                DEFAULT_ENABLE_THINKING_EFFORT_CONFLICT_RECTIFIER,
             enable_thinking_signature_rectifier: DEFAULT_ENABLE_THINKING_SIGNATURE_RECTIFIER,
             enable_thinking_budget_rectifier: DEFAULT_ENABLE_THINKING_BUDGET_RECTIFIER,
+            enable_gemini_function_id_rectifier: DEFAULT_ENABLE_GEMINI_FUNCTION_ID_RECTIFIER,
+            enable_response_input_rectifier: DEFAULT_ENABLE_RESPONSE_INPUT_RECTIFIER,
+            codex_priority_billing_source: CodexPriorityBillingSource::default(),
             enable_billing_header_rectifier: DEFAULT_ENABLE_BILLING_HEADER_RECTIFIER,
             enable_codex_session_id_completion: DEFAULT_ENABLE_CODEX_SESSION_ID_COMPLETION,
             enable_claude_metadata_user_id_injection:

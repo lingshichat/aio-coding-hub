@@ -2,6 +2,9 @@
 
 use crate::shared::fs::{read_optional_file_with_max_len, write_file_atomic_if_changed};
 use serde::Serialize;
+#[cfg(not(windows))]
+use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -14,6 +17,7 @@ const ENV_KEY_DISABLE_ERROR_REPORTING: &str = "DISABLE_ERROR_REPORTING";
 #[cfg(not(windows))]
 const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(2);
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
+const CODEX_CATALOG_TIMEOUT: Duration = Duration::from_secs(20);
 const CMD_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const COMMAND_OUTPUT_STREAM_LIMIT: usize = 16 * 1024;
 const COMMAND_OUTPUT_READ_CHUNK_SIZE: usize = 8 * 1024;
@@ -41,6 +45,13 @@ pub struct SimpleCliInfo {
     pub error: Option<String>,
     pub shell: Option<String>,
     pub resolved_via: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct CodexLaunchSpec {
+    pub(crate) executable: PathBuf,
+    pub(crate) runtime_path: OsString,
+    pub(crate) version: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, specta::Type)]
@@ -118,19 +129,23 @@ fn read_limited_command_output<R: Read>(
     })
 }
 
-fn spawn_limited_output_reader<R>(reader: R) -> JoinHandle<std::io::Result<LimitedCommandOutput>>
+fn spawn_limited_output_reader<R>(
+    reader: R,
+    limit: usize,
+) -> JoinHandle<std::io::Result<LimitedCommandOutput>>
 where
     R: Read + Send + 'static,
 {
-    std::thread::spawn(move || read_limited_command_output(reader, COMMAND_OUTPUT_STREAM_LIMIT))
+    std::thread::spawn(move || read_limited_command_output(reader, limit))
 }
 
 fn collect_output_reader(
     task: Option<JoinHandle<std::io::Result<LimitedCommandOutput>>>,
     stream_name: &str,
+    limit: usize,
 ) -> crate::shared::error::AppResult<LimitedCommandOutput> {
     let Some(task) = task else {
-        return Ok(LimitedCommandOutput::empty(COMMAND_OUTPUT_STREAM_LIMIT));
+        return Ok(LimitedCommandOutput::empty(limit));
     };
 
     match task.join() {
@@ -144,9 +159,10 @@ fn collect_limited_process_output(
     status: std::process::ExitStatus,
     stdout_task: Option<JoinHandle<std::io::Result<LimitedCommandOutput>>>,
     stderr_task: Option<JoinHandle<std::io::Result<LimitedCommandOutput>>>,
+    limit: usize,
 ) -> crate::shared::error::AppResult<LimitedProcessOutput> {
-    let stdout = collect_output_reader(stdout_task, "stdout")?;
-    let stderr = collect_output_reader(stderr_task, "stderr")?;
+    let stdout = collect_output_reader(stdout_task, "stdout", limit)?;
+    let stderr = collect_output_reader(stderr_task, "stderr", limit)?;
     Ok(LimitedProcessOutput {
         status,
         stdout,
@@ -157,9 +173,10 @@ fn collect_limited_process_output(
 fn drain_limited_output_readers(
     stdout_task: Option<JoinHandle<std::io::Result<LimitedCommandOutput>>>,
     stderr_task: Option<JoinHandle<std::io::Result<LimitedCommandOutput>>>,
+    limit: usize,
 ) {
-    let _ = collect_output_reader(stdout_task, "stdout");
-    let _ = collect_output_reader(stderr_task, "stderr");
+    let _ = collect_output_reader(stdout_task, "stdout", limit);
+    let _ = collect_output_reader(stderr_task, "stderr", limit);
 }
 
 fn limited_output_to_string(output: &LimitedCommandOutput, stream_name: &str) -> String {
@@ -177,43 +194,72 @@ fn limited_output_to_string(output: &LimitedCommandOutput, stream_name: &str) ->
 }
 
 fn command_output_with_timeout(
+    cmd: Command,
+    timeout: Duration,
+    label: String,
+) -> crate::shared::error::AppResult<LimitedProcessOutput> {
+    command_output_with_timeout_limit(cmd, timeout, label, COMMAND_OUTPUT_STREAM_LIMIT)
+}
+
+fn command_output_with_timeout_limit(
     mut cmd: Command,
     timeout: Duration,
     label: String,
+    output_limit: usize,
 ) -> crate::shared::error::AppResult<LimitedProcessOutput> {
     cmd.stdin(Stdio::null());
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());
+    #[cfg(unix)]
+    crate::shared::process::configure_unix_process_group(&mut cmd);
 
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("failed to execute {label}: {e}"))?;
-    let stdout_task = child.stdout.take().map(spawn_limited_output_reader);
-    let stderr_task = child.stderr.take().map(spawn_limited_output_reader);
+    let stdout_task = child
+        .stdout
+        .take()
+        .map(|reader| spawn_limited_output_reader(reader, output_limit));
+    let stderr_task = child
+        .stderr
+        .take()
+        .map(|reader| spawn_limited_output_reader(reader, output_limit));
 
     let start = Instant::now();
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
-                return collect_limited_process_output(status, stdout_task, stderr_task);
+                return collect_limited_process_output(
+                    status,
+                    stdout_task,
+                    stderr_task,
+                    output_limit,
+                );
             }
             Ok(None) => {
                 if start.elapsed() >= timeout {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    drain_limited_output_readers(stdout_task, stderr_task);
+                    terminate_command(&mut child);
+                    drain_limited_output_readers(stdout_task, stderr_task, output_limit);
                     return Err(format!("{label} timed out after {}ms", timeout.as_millis()).into());
                 }
                 std::thread::sleep(CMD_POLL_INTERVAL);
             }
             Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                drain_limited_output_readers(stdout_task, stderr_task);
+                terminate_command(&mut child);
+                drain_limited_output_readers(stdout_task, stderr_task, output_limit);
                 return Err(format!("failed to wait for {label}: {e}").into());
             }
         }
     }
+}
+
+fn terminate_command(child: &mut std::process::Child) {
+    #[cfg(unix)]
+    crate::shared::process::terminate_unix_process_group(child.id());
+    #[cfg(windows)]
+    crate::shared::process::terminate_windows_process_tree(child.id());
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 fn home_dir<R: tauri::Runtime>(
@@ -446,6 +492,24 @@ fn platform_extra_path_dirs() -> &'static [&'static str] {
     }
 }
 
+#[cfg(not(windows))]
+fn version_probe_path(
+    exe: &Path,
+    current_path: Option<&OsStr>,
+) -> crate::shared::error::AppResult<OsString> {
+    let mut paths: Vec<PathBuf> = Vec::new();
+    if let Some(parent) = exe.parent().filter(|p| !p.as_os_str().is_empty()) {
+        paths.push(parent.to_path_buf());
+    }
+    paths.extend(platform_extra_path_dirs().iter().map(PathBuf::from));
+    if let Some(current_path) = current_path {
+        paths.extend(std::env::split_paths(current_path));
+    }
+
+    std::env::join_paths(paths)
+        .map_err(|err| format!("failed to build PATH for version probe: {err}").into())
+}
+
 fn find_exe_in_path(names: &[String]) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     let raw = path.to_string_lossy().to_string();
@@ -459,8 +523,8 @@ fn find_exe_in_path(names: &[String]) -> Option<PathBuf> {
     None
 }
 
-fn scan_executable(
-    app: &tauri::AppHandle,
+fn scan_executable<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
     cmd: &str,
 ) -> crate::shared::error::AppResult<Option<PathBuf>> {
     let names = exe_names_for(cmd);
@@ -609,17 +673,19 @@ fn run_version(exe: &Path) -> crate::shared::error::AppResult<String> {
     // GUI-launched processes on macOS/Linux inherit a minimal PATH that often
     // lacks Homebrew / nvm / system dirs. Prepend the standard locations so that
     // shebang-based CLIs (#!/usr/bin/env node) can resolve their runtime.
+    //
+    // Crucially, include the executable's own parent directory: version managers
+    // (nvm, volta, fnm, asdf) place both `node` and global npm packages in the
+    // same bin dir, so adding it ensures `#!/usr/bin/env node` resolves.
     #[cfg(not(windows))]
     {
-        let extra = platform_extra_path_dirs().join(":");
-        cmd.env(
-            "PATH",
-            format!("{}:{}", extra, std::env::var("PATH").unwrap_or_default()),
-        );
+        let current_path = std::env::var_os("PATH");
+        cmd.env("PATH", version_probe_path(exe, current_path.as_deref())?);
     }
 
     #[cfg(windows)]
     {
+        cmd.env("PATH", runtime_path_for_executable(exe)?);
         use std::os::windows::process::CommandExt;
         const CREATE_NO_WINDOW: u32 = 0x08000000;
         cmd.creation_flags(CREATE_NO_WINDOW);
@@ -649,6 +715,104 @@ fn run_version(exe: &Path) -> crate::shared::error::AppResult<String> {
     }
     .to_string()
     .into())
+}
+
+fn runtime_path_for_executable(exe: &Path) -> crate::shared::error::AppResult<OsString> {
+    #[cfg(not(windows))]
+    {
+        let current_path = std::env::var_os("PATH");
+        version_probe_path(exe, current_path.as_deref())
+    }
+
+    #[cfg(windows)]
+    {
+        let mut paths = Vec::new();
+        if let Some(parent) = exe.parent().filter(|path| !path.as_os_str().is_empty()) {
+            paths.push(parent.to_path_buf());
+        }
+
+        for variable in ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"] {
+            if let Some(root) = std::env::var_os(variable) {
+                let root = PathBuf::from(root);
+                paths.push(root.join("nodejs"));
+                if variable == "LOCALAPPDATA" {
+                    paths.push(root.join("Programs").join("nodejs"));
+                }
+            }
+        }
+        if let Some(appdata) = std::env::var_os("APPDATA") {
+            paths.push(PathBuf::from(appdata).join("npm"));
+        }
+        if let Some(current_path) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&current_path));
+        }
+
+        std::env::join_paths(paths)
+            .map_err(|err| format!("failed to build Windows PATH for Codex: {err}").into())
+    }
+}
+
+pub(crate) fn codex_launch_spec<R: tauri::Runtime>(
+    app: &tauri::AppHandle<R>,
+) -> crate::shared::error::AppResult<Option<CodexLaunchSpec>> {
+    let exe = match resolve_executable_via_login_shell("codex") {
+        Ok(Some(path)) => Some(path),
+        Ok(None) | Err(_) => scan_executable(app, "codex")?,
+    };
+    let Some(executable) = exe else {
+        return Ok(None);
+    };
+
+    Ok(Some(CodexLaunchSpec {
+        runtime_path: runtime_path_for_executable(&executable)?,
+        version: run_version(&executable).ok(),
+        executable,
+    }))
+}
+
+pub(crate) fn codex_bundled_model_catalog_json(
+    launch: &CodexLaunchSpec,
+    codex_home: &Path,
+) -> crate::shared::error::AppResult<Vec<u8>> {
+    let mut command = Command::new(&launch.executable);
+    command.args(["debug", "models", "--bundled"]);
+
+    command
+        .env("CODEX_HOME", codex_home)
+        .env("PATH", &launch.runtime_path);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x08000000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let output = command_output_with_timeout_limit(
+        command,
+        CODEX_CATALOG_TIMEOUT,
+        format!("{} debug models --bundled", launch.executable.display()),
+        crate::infra::codex_model_catalog::CODEX_CATALOG_MAX_BYTES,
+    )?;
+    if output.stdout.truncated {
+        return Err(format!(
+            "CLI_PROXY_CODEX_CATALOG_FAILED: bundled catalog exceeds {} bytes",
+            crate::infra::codex_model_catalog::CODEX_CATALOG_MAX_BYTES
+        )
+        .into());
+    }
+    if !output.status.success() {
+        let stderr = limited_output_to_string(&output.stderr, "stderr");
+        let message = if stderr.is_empty() {
+            "Codex bundled catalog command failed".to_string()
+        } else {
+            stderr
+        };
+        return Err(format!("CLI_PROXY_CODEX_CATALOG_FAILED: {message}").into());
+    }
+    if output.stdout.bytes.is_empty() {
+        return Err("CLI_PROXY_CODEX_CATALOG_FAILED: bundled catalog is empty".into());
+    }
+    Ok(output.stdout.bytes)
 }
 
 fn cli_probe(app: &tauri::AppHandle, cmd: &str) -> crate::shared::error::AppResult<CliProbeResult> {
@@ -841,5 +1005,51 @@ mod tests {
             .to_string();
 
         assert!(err.contains("claude/settings.json too large"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn run_version_resolves_shebang_interpreter_from_exe_parent_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        fs::create_dir(&bin_dir).expect("create bin dir");
+
+        // Create a fake "node" interpreter that just prints a version string.
+        let node_path = bin_dir.join("node");
+        fs::write(&node_path, "#!/bin/sh\necho \"v20.0.0\"\n").expect("write fake node");
+        fs::set_permissions(&node_path, fs::Permissions::from_mode(0o755))
+            .expect("chmod fake node");
+
+        // Create a fake CLI script with #!/usr/bin/env node shebang.
+        let cli_path = bin_dir.join("fakecli");
+        fs::write(&cli_path, "#!/usr/bin/env node\nconsole.log(\"1.2.3\")\n")
+            .expect("write fake cli");
+        fs::set_permissions(&cli_path, fs::Permissions::from_mode(0o755)).expect("chmod fake cli");
+
+        // run_version should use the fake node from exe's parent dir, not any
+        // node inherited from the developer machine PATH.
+        assert_eq!(run_version(&cli_path).expect("run version"), "v20.0.0");
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn version_probe_path_prepends_exe_parent_and_preserves_existing_path() {
+        let dir = tempdir().expect("tempdir");
+        let bin_dir = dir.path().join("bin");
+        let exe = bin_dir.join("fakecli");
+        let existing_path =
+            std::env::join_paths([PathBuf::from("/usr/bin"), PathBuf::from("/bin")])
+                .expect("join fixture path");
+
+        let path = version_probe_path(&exe, Some(existing_path.as_os_str())).expect("probe path");
+        let entries: Vec<PathBuf> = std::env::split_paths(&path).collect();
+
+        assert_eq!(entries.first(), Some(&bin_dir));
+        for dir in platform_extra_path_dirs() {
+            assert!(entries.contains(&PathBuf::from(dir)));
+        }
+        assert!(entries.ends_with(&[PathBuf::from("/usr/bin"), PathBuf::from("/bin")]));
     }
 }

@@ -60,9 +60,6 @@ pub(super) fn inject_auth<R: tauri::Runtime>(
     if prepared.use_codex_chatgpt_backend {
         maybe_inject_codex_chatgpt_headers(headers, prepared.codex_chatgpt_account_id.as_deref());
     }
-    if prepared.strip_request_content_encoding {
-        headers.remove(header::CONTENT_ENCODING);
-    }
 
     Ok(())
 }
@@ -113,6 +110,14 @@ fn inject_oauth_auth<R: tauri::Runtime>(
                     circuit_state_after: None,
                     circuit_failure_count: Some(error_ctx.circuit_before.failure_count),
                     circuit_failure_threshold: Some(error_ctx.circuit_before.failure_threshold),
+                    circuit_recover_at_unix: None,
+                    circuit_trigger_error_code: None,
+                    provider_bridged: Some(prepared.provider_bridged),
+                    timeout_secs: None,
+                    reasoning_effort: None,
+                    upstream_sent: false,
+                    claude_model_mapping: prepared.claude_model_mapping.clone(),
+                    model_redirect: prepared.model_redirect.clone(),
                 }));
             }
             Ok(())
@@ -143,6 +148,14 @@ fn inject_oauth_auth<R: tauri::Runtime>(
                 circuit_state_after: None,
                 circuit_failure_count: Some(error_ctx.circuit_before.failure_count),
                 circuit_failure_threshold: Some(error_ctx.circuit_before.failure_threshold),
+                circuit_recover_at_unix: None,
+                circuit_trigger_error_code: None,
+                provider_bridged: Some(prepared.provider_bridged),
+                timeout_secs: None,
+                reasoning_effort: None,
+                upstream_sent: false,
+                claude_model_mapping: prepared.claude_model_mapping.clone(),
+                model_redirect: prepared.model_redirect.clone(),
             }))
         }
     }

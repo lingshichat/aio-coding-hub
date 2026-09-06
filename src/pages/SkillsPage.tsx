@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
-import { CLIS, cliFromKeyOrDefault, isCliKey } from "../constants/clis";
+import { cliFromKeyOrDefault, cliKeysWith, isCliKey } from "../constants/clis";
+import { SKILLS_ACTIVE_CLI_STORAGE_KEY } from "../constants/skills";
 import { logToConsole } from "../services/consoleLog";
 import { getOrderedClis, pickDefaultCliByPriority } from "../services/cli/cliPriorityOrder";
 import type { CliKey } from "../services/providers/providers";
@@ -14,27 +15,30 @@ import { SkillsView } from "./skills/SkillsView";
 import { useSettingsQuery } from "../query/settings";
 import { useWorkspacesListQuery } from "../query/workspaces";
 
+const SKILLS_CLI_KEYS = cliKeysWith("skills");
+
 function readCliFromStorage(): CliKey | null {
   try {
-    const raw = localStorage.getItem("skills.activeCli");
-    if (isCliKey(raw)) return raw;
+    const raw = localStorage.getItem(SKILLS_ACTIVE_CLI_STORAGE_KEY);
+    if (isCliKey(raw) && SKILLS_CLI_KEYS.includes(raw)) return raw;
   } catch {}
   return null;
 }
 
 function writeCliToStorage(cli: CliKey) {
   try {
-    localStorage.setItem("skills.activeCli", cli);
+    localStorage.setItem(SKILLS_ACTIVE_CLI_STORAGE_KEY, cli);
   } catch {}
 }
 
 export function SkillsPage() {
   const navigate = useNavigate();
   const settingsQuery = useSettingsQuery();
-  const orderedCliTabs = getOrderedClis(settingsQuery.data?.cli_priority_order);
+  const orderedCliTabs = getOrderedClis(settingsQuery.data?.cli_priority_order, SKILLS_CLI_KEYS);
   const orderedCliKeys = orderedCliTabs.map((cli) => cli.key);
   const defaultCli =
-    pickDefaultCliByPriority(settingsQuery.data?.cli_priority_order, orderedCliKeys) ?? CLIS[0].key;
+    pickDefaultCliByPriority(settingsQuery.data?.cli_priority_order, orderedCliKeys) ??
+    SKILLS_CLI_KEYS[0];
   const [activeCli, setActiveCli] = useState<CliKey | null>(() => readCliFromStorage());
   const effectiveCli = activeCli ?? defaultCli;
   const currentCli = useMemo(() => cliFromKeyOrDefault(effectiveCli), [effectiveCli]);
@@ -77,7 +81,7 @@ export function SkillsPage() {
         />
       </div>
 
-      <div className="shrink-0 rounded-xl border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-800 px-3 py-2 text-sm text-slate-700 dark:text-slate-300">
+      <div className="shrink-0 rounded-lg border border-line-subtle bg-secondary px-3 py-2 text-sm text-secondary-foreground">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div>这是高级入口：默认操作当前 workspace。推荐在「Workspaces」配置中心统一管理。</div>
           <Button variant="secondary" onClick={() => navigate("/workspaces")}>
@@ -88,9 +92,9 @@ export function SkillsPage() {
 
       <div className="min-h-0 flex-1 lg:overflow-hidden">
         {loading ? (
-          <div className="text-sm text-slate-600 dark:text-slate-400">加载中…</div>
+          <div className="text-sm text-muted-foreground">加载中…</div>
         ) : !activeWorkspaceId ? (
-          <div className="text-sm text-slate-600 dark:text-slate-400">
+          <div className="text-sm text-muted-foreground">
             未找到 {currentCli.name} 的当前工作区（workspace）。请先在 Workspaces
             页面创建并设为当前。
           </div>

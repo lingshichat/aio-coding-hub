@@ -1,6 +1,7 @@
 import type { ConfigImportResult } from "../../services/app/configMigrate";
-import type { ClearRequestLogsResult } from "../../services/app/dataManagement";
+import type { ClearRequestLogsResult, DbCompactResult } from "../../services/app/dataManagement";
 import type { ModelPricesSyncReport } from "../../services/usage/modelPrices";
+import { formatBytes } from "../../utils/formatters";
 
 export type AvailableStatus = "checking" | "available" | "unavailable";
 
@@ -16,7 +17,12 @@ export function resolveAvailableStatus<TValue>(
 }
 
 export function buildRequestLogsClearedMessage(result: ClearRequestLogsResult) {
-  return `已清理请求日志：request_logs ${result.request_logs_deleted} 条；legacy request_attempt_logs ${result.request_attempt_logs_deleted} 条`;
+  return `已清理请求日志：request_logs ${result.request_logs_deleted} 条`;
+}
+
+export function buildDbCompactedMessage(result: DbCompactResult) {
+  const freedBytes = Math.max(0, result.before_bytes - result.after_bytes);
+  return `数据库压缩完成：已释放 ${formatBytes(freedBytes)}`;
 }
 
 export function buildConfigImportSuccessMessage(result: ConfigImportResult) {
@@ -24,9 +30,11 @@ export function buildConfigImportSuccessMessage(result: ConfigImportResult) {
 }
 
 export function buildModelPricesSyncMessage(report: ModelPricesSyncReport) {
-  if (report.status === "not_modified") {
-    return "模型定价已是最新（无变更）";
+  if (report.status === "failed") {
+    return `定价同步失败${report.error ? `：${report.error}` : ""}`;
   }
-
-  return `同步完成：新增 ${report.inserted}，更新 ${report.updated}，跳过 ${report.skipped}`;
+  if (report.status === "not_modified") {
+    return "定价已是最新，无变更";
+  }
+  return `定价同步完成：新增 ${report.inserted} · 更新 ${report.updated} · 共 ${report.total} 条`;
 }

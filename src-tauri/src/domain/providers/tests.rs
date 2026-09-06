@@ -1,4 +1,7 @@
+use super::queries::pool_order_set;
+use super::types::CX2CC_BRIDGE_TYPE;
 use super::*;
+use rusqlite::OptionalExtension;
 
 // -- ClaudeModels::map_model --
 
@@ -12,7 +15,26 @@ fn claude_models_no_config_keeps_original() {
 }
 
 #[test]
-fn claude_models_thinking_prefers_reasoning_model() {
+fn claude_models_type_slot_prevents_thinking_reasoning_override() {
+    let models = ClaudeModels {
+        main_model: Some("glm-main".to_string()),
+        reasoning_model: Some("glm-thinking".to_string()),
+        haiku_model: Some("claude-haiku-4-5-20251001".to_string()),
+        sonnet_model: Some("glm-sonnet".to_string()),
+        opus_model: Some("glm-opus".to_string()),
+    }
+    .normalized();
+
+    assert_eq!(
+        models.map_model("claude-haiku-4-5-20251001", true),
+        "claude-haiku-4-5-20251001"
+    );
+    assert_eq!(models.map_model("claude-sonnet-4", true), "glm-sonnet");
+    assert_eq!(models.map_model("claude-opus-4", true), "glm-opus");
+}
+
+#[test]
+fn claude_models_thinking_uses_reasoning_for_unknown_model() {
     let models = ClaudeModels {
         main_model: Some("glm-main".to_string()),
         reasoning_model: Some("glm-thinking".to_string()),
@@ -22,7 +44,7 @@ fn claude_models_thinking_prefers_reasoning_model() {
     }
     .normalized();
 
-    assert_eq!(models.map_model("claude-sonnet-4", true), "glm-thinking");
+    assert_eq!(models.map_model("some-unknown-model", true), "glm-thinking");
 }
 
 #[test]
@@ -404,6 +426,7 @@ fn default_provider_params(name: &str) -> ProviderUpsertParams {
         cost_multiplier: 1.0,
         priority: Some(100),
         claude_models: None,
+        model_policy: None,
         limit_5h_usd: None,
         limit_daily_usd: None,
         daily_reset_mode: Some(DailyResetMode::Fixed),
@@ -416,7 +439,157 @@ fn default_provider_params(name: &str) -> ProviderUpsertParams {
         source_provider_id: None,
         bridge_type: None,
         stream_idle_timeout_seconds: None,
+        extension_values: None,
     }
+}
+
+fn seed_plugin(db: &crate::db::Db, plugin_id: &str) {
+    let conn = db.open_connection().expect("open db connection");
+    conn.execute(
+        r#"
+INSERT INTO plugins(
+  plugin_id,
+  name,
+  install_source,
+  status,
+  manifest_json,
+  config_json,
+  granted_permissions_json,
+  created_at,
+  updated_at
+) VALUES (?1, ?1, 'dev', 'enabled', '{}', '{}', '[]', 1, 1)
+"#,
+        rusqlite::params![plugin_id],
+    )
+    .expect("insert plugin");
+}
+
+#[test]
+fn provider_upsert_replaces_extension_values_when_submitted() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("provider_extension_values_replace.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+    seed_plugin(&db, "plugin.alpha");
+
+    let mut params = default_provider_params("extension-values-preserve");
+    params.extension_values = Some(vec![
+        ProviderExtensionValuesInput {
+            plugin_id: "plugin.alpha".to_string(),
+            namespace: "first".to_string(),
+            values: serde_json::json!({ "enabled": true }),
+        },
+        ProviderExtensionValuesInput {
+            plugin_id: "plugin.alpha".to_string(),
+            namespace: "second".to_string(),
+            values: serde_json::json!({ "threshold": 2 }),
+        },
+    ]);
+
+    let saved = upsert(&db, params).expect("save provider extension values");
+    assert_eq!(saved.extension_values.len(), 2);
+
+    let mut preserve_update = default_provider_params("extension-values-preserve-updated");
+    preserve_update.provider_id = Some(saved.id);
+    preserve_update.extension_values = None;
+
+    let preserved = upsert(&db, preserve_update).expect("update provider without extension values");
+
+    assert_eq!(preserved.extension_values.len(), 2);
+    assert!(preserved.extension_values.iter().any(|value| {
+        value.plugin_id == "plugin.alpha"
+            && value.namespace == "first"
+            && value.values == serde_json::json!({ "enabled": true })
+    }));
+    assert!(preserved.extension_values.iter().any(|value| {
+        value.plugin_id == "plugin.alpha"
+            && value.namespace == "second"
+            && value.values == serde_json::json!({ "threshold": 2 })
+    }));
+
+    let mut clear_update = default_provider_params("extension-values-clear");
+    clear_update.provider_id = Some(saved.id);
+    clear_update.extension_values = Some(vec![]);
+
+    let cleared = upsert(&db, clear_update).expect("clear provider extension values");
+    assert!(cleared.extension_values.is_empty());
+
+    let mut replace_update = default_provider_params("extension-values-one");
+    replace_update.provider_id = Some(saved.id);
+    replace_update.extension_values = Some(vec![ProviderExtensionValuesInput {
+        plugin_id: "plugin.alpha".to_string(),
+        namespace: "first".to_string(),
+        values: serde_json::json!({ "enabled": false }),
+    }]);
+
+    let replaced = upsert(&db, replace_update).expect("replace provider extension values");
+    assert_eq!(replaced.extension_values.len(), 1);
+    assert_eq!(replaced.extension_values[0].plugin_id, "plugin.alpha");
+    assert_eq!(replaced.extension_values[0].namespace, "first");
+    assert_eq!(
+        replaced.extension_values[0].values,
+        serde_json::json!({ "enabled": false })
+    );
+}
+
+#[test]
+fn provider_duplicate_copies_extension_values() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("provider_extension_values_duplicate.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+    seed_plugin(&db, "plugin.alpha");
+
+    let mut source_params = default_provider_params("extension-values-source");
+    source_params.extension_values = Some(vec![ProviderExtensionValuesInput {
+        plugin_id: "plugin.alpha".to_string(),
+        namespace: "routing".to_string(),
+        values: serde_json::json!({ "mode": "sticky" }),
+    }]);
+    let source = upsert(&db, source_params).expect("save source provider");
+
+    let source_summary = {
+        let conn = db.open_connection().expect("open db connection");
+        get_by_id(&conn, source.id).expect("get source provider")
+    };
+    let duplicated = duplicate(
+        &db,
+        source.id,
+        ProviderUpsertParams {
+            provider_id: None,
+            cli_key: source_summary.cli_key.clone(),
+            name: "extension-values-duplicate".to_string(),
+            base_urls: source_summary.base_urls.clone(),
+            base_url_mode: source_summary.base_url_mode,
+            auth_mode: Some(ProviderAuthMode::ApiKey),
+            api_key: Some("sk-test".to_string()),
+            enabled: source_summary.enabled,
+            cost_multiplier: source_summary.cost_multiplier,
+            priority: None,
+            claude_models: Some(source_summary.claude_models.clone()),
+            model_policy: source_summary.model_policy.clone(),
+            limit_5h_usd: source_summary.limit_5h_usd,
+            limit_daily_usd: source_summary.limit_daily_usd,
+            daily_reset_mode: Some(source_summary.daily_reset_mode),
+            daily_reset_time: Some(source_summary.daily_reset_time.clone()),
+            limit_weekly_usd: source_summary.limit_weekly_usd,
+            limit_monthly_usd: source_summary.limit_monthly_usd,
+            limit_total_usd: source_summary.limit_total_usd,
+            tags: Some(source_summary.tags.clone()),
+            note: Some(source_summary.note.clone()),
+            source_provider_id: source_summary.source_provider_id,
+            bridge_type: source_summary.bridge_type.clone(),
+            stream_idle_timeout_seconds: source_summary.stream_idle_timeout_seconds,
+            extension_values: None,
+        },
+    )
+    .expect("duplicate provider");
+
+    assert_eq!(duplicated.extension_values.len(), 1);
+    assert_eq!(duplicated.extension_values[0].plugin_id, "plugin.alpha");
+    assert_eq!(duplicated.extension_values[0].namespace, "routing");
+    assert_eq!(
+        duplicated.extension_values[0].values,
+        serde_json::json!({ "mode": "sticky" })
+    );
 }
 
 #[test]
@@ -446,6 +619,58 @@ fn upsert_rejects_unicode_note_over_character_limit() {
 }
 
 #[test]
+fn upsert_accepts_claude_model_name_at_character_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_model_name_limit.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("model-name-at-limit");
+    params.claude_models = Some(ClaudeModels {
+        main_model: Some("m".repeat(MAX_MODEL_NAME_LEN)),
+        ..ClaudeModels::default()
+    });
+
+    let saved = upsert(&db, params).expect("save provider");
+    let main_model = saved.claude_models.main_model.expect("main model");
+    assert_eq!(main_model.chars().count(), MAX_MODEL_NAME_LEN);
+}
+
+#[test]
+fn upsert_rejects_claude_model_name_over_character_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_model_name_over_limit.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("model-name-over-limit");
+    params.claude_models = Some(ClaudeModels {
+        main_model: Some("m".repeat(MAX_MODEL_NAME_LEN + 1)),
+        ..ClaudeModels::default()
+    });
+
+    let err = upsert(&db, params).expect_err("model name over limit");
+    assert!(err.to_string().contains("main_model must be at most"));
+}
+
+#[test]
+fn upsert_update_rejects_claude_model_name_over_character_limit() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_model_name_update_over_limit.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let saved = upsert(&db, default_provider_params("model-name-update")).expect("save provider");
+
+    let mut params = default_provider_params("model-name-update");
+    params.provider_id = Some(saved.id);
+    params.claude_models = Some(ClaudeModels {
+        reasoning_model: Some("模".repeat(MAX_MODEL_NAME_LEN + 1)),
+        ..ClaudeModels::default()
+    });
+
+    let err = upsert(&db, params).expect_err("model name over limit on update");
+    assert!(err.to_string().contains("reasoning_model must be at most"));
+}
+
+#[test]
 fn upsert_oauth_provider_drops_submitted_base_urls() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("providers_oauth_base_urls.db");
@@ -458,6 +683,79 @@ fn upsert_oauth_provider_drops_submitted_base_urls() {
 
     let saved = upsert(&db, params).expect("save oauth provider");
     assert!(saved.base_urls.is_empty());
+}
+
+#[test]
+fn upsert_accepts_grok_api_key_provider() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_grok_api_key.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("grok-api-key");
+    params.cli_key = "grok".to_string();
+
+    let saved = upsert(&db, params).expect("save Grok API key provider");
+
+    assert_eq!(saved.cli_key, "grok");
+    assert_eq!(saved.auth_mode, ProviderAuthMode::ApiKey.as_str());
+    assert_eq!(saved.base_urls, vec!["https://api.example.com"]);
+}
+
+#[test]
+fn upsert_accepts_grok_oauth_provider() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_grok_oauth.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("grok-oauth");
+    params.cli_key = "grok".to_string();
+    params.auth_mode = Some(ProviderAuthMode::Oauth);
+    params.api_key = None;
+    // OAuth providers discard base_urls (empty list) to avoid stale transport values.
+    params.base_urls = vec!["https://should-be-cleared.example".to_string()];
+
+    let saved = upsert(&db, params).expect("save Grok OAuth provider");
+
+    assert_eq!(saved.cli_key, "grok");
+    assert_eq!(saved.auth_mode, ProviderAuthMode::Oauth.as_str());
+    assert!(saved.base_urls.is_empty());
+}
+
+#[test]
+fn upsert_rejects_grok_cx2cc_provider() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_grok_cx2cc.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("grok-cx2cc");
+    params.cli_key = "grok".to_string();
+    params.bridge_type = Some(CX2CC_BRIDGE_TYPE.to_string());
+
+    let error = upsert(&db, params).expect_err("Grok CX2CC must be rejected");
+
+    assert!(error
+        .to_string()
+        .contains("cx2cc bridge is only supported for claude"));
+}
+
+#[test]
+fn upsert_rejects_grok_claude_model_fields() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_grok_claude_models.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let mut params = default_provider_params("grok-claude-models");
+    params.cli_key = "grok".to_string();
+    params.claude_models = Some(ClaudeModels {
+        main_model: Some("not-applicable".to_string()),
+        ..ClaudeModels::default()
+    });
+
+    let error = upsert(&db, params).expect_err("Grok Claude model fields must be rejected");
+
+    assert!(error
+        .to_string()
+        .contains("claude_models is only supported for cli_key=claude"));
 }
 
 #[test]
@@ -482,6 +780,128 @@ fn reorder_rejects_invalid_duplicate_and_oversized_provider_ids() {
         .contains("ordered_provider_ids must contain at most"));
 }
 
+#[test]
+fn pool_order_is_independent_from_default_route_order() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_pool_order.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let (p1_id, p2_id, p3_id) = {
+        let p1 = upsert(&db, default_provider_params("pool-p1")).expect("save p1");
+        let p2 = upsert(&db, default_provider_params("pool-p2")).expect("save p2");
+        let p3 = upsert(&db, default_provider_params("pool-p3")).expect("save p3");
+        (p1.id, p2.id, p3.id)
+    };
+
+    default_route_set_order(&db, "claude", vec![p1_id, p2_id]).expect("set default route");
+    pool_order_set(&db, "claude", vec![p3_id, p1_id]).expect("set pool order");
+
+    let pool_ids: Vec<i64> = list_by_cli(&db, "claude")
+        .expect("list providers")
+        .into_iter()
+        .map(|p| p.id)
+        .collect();
+    assert_eq!(pool_ids, vec![p3_id, p1_id, p2_id]);
+
+    let default_ids: Vec<i64> = default_route_list(&db, "claude")
+        .expect("list default route")
+        .into_iter()
+        .map(|row| row.provider_id)
+        .collect();
+    assert_eq!(default_ids, vec![p1_id, p2_id]);
+}
+
+#[test]
+fn default_route_gateway_uses_membership_and_global_enabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_default_route_gateway.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let (p1_id, p2_id, p3_enabled) = {
+        let p1 = upsert(&db, default_provider_params("default-p1")).expect("save p1");
+        let mut p2_params = default_provider_params("default-p2");
+        p2_params.enabled = false;
+        let p2 = upsert(&db, p2_params).expect("save p2");
+        let p3 = upsert(&db, default_provider_params("default-p3")).expect("save p3");
+        (p1.id, p2.id, p3.enabled)
+    };
+
+    default_route_set_order(&db, "claude", vec![p2_id, p1_id]).expect("set default route");
+
+    let selection =
+        list_enabled_for_gateway_using_active_mode(&db, "claude").expect("list gateway providers");
+    assert_eq!(selection.sort_mode_id, None);
+    assert_eq!(
+        selection
+            .providers
+            .into_iter()
+            .map(|provider| provider.id)
+            .collect::<Vec<_>>(),
+        vec![p1_id]
+    );
+
+    // p3 remains globally enabled but is not a Default member, so it is not routed.
+    assert!(p3_enabled);
+}
+
+fn seed_usage_request_log(db: &crate::db::Db, trace_id: &str, provider_id: i64) {
+    let conn = db.open_connection().expect("open db connection");
+    conn.execute(
+        r#"
+INSERT INTO request_logs (
+  trace_id, cli_key, method, path, duration_ms, attempts_json, created_at,
+  input_tokens, output_tokens, total_tokens, excluded_from_stats, final_provider_id
+) VALUES (?1, 'claude', 'POST', '/v1/messages', 12, '[]', 100, 10, 5, 15, 0, ?2)
+"#,
+        rusqlite::params![trace_id, provider_id],
+    )
+    .expect("insert request log");
+}
+
+fn request_log_exists(db: &crate::db::Db, trace_id: &str) -> bool {
+    let conn = db.open_connection().expect("open db connection");
+    conn.query_row(
+        "SELECT 1 FROM request_logs WHERE trace_id = ?1",
+        rusqlite::params![trace_id],
+        |row| row.get::<_, i64>(0),
+    )
+    .optional()
+    .expect("read request log")
+    .is_some()
+}
+
+#[test]
+fn delete_keeps_request_logs_by_default() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_delete_keep_logs.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let saved = upsert(&db, default_provider_params("delete-keep-logs")).expect("save provider");
+    seed_usage_request_log(&db, "trace-delete-keep", saved.id);
+
+    delete(&db, saved.id, false).expect("delete provider");
+
+    assert!(request_log_exists(&db, "trace-delete-keep"));
+}
+
+#[test]
+fn delete_removes_provider_request_logs_when_requested() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db_path = dir.path().join("providers_delete_clear_logs.db");
+    let db = crate::db::init_for_tests(&db_path).expect("init db");
+
+    let saved = upsert(&db, default_provider_params("delete-clear-logs")).expect("save provider");
+    let other =
+        upsert(&db, default_provider_params("delete-clear-other")).expect("save other provider");
+    seed_usage_request_log(&db, "trace-delete-clear", saved.id);
+    seed_usage_request_log(&db, "trace-delete-other", other.id);
+
+    delete(&db, saved.id, true).expect("delete provider");
+
+    assert!(!request_log_exists(&db, "trace-delete-clear"));
+    assert!(request_log_exists(&db, "trace-delete-other"));
+}
+
 fn create_oauth_provider_for_cas_test(db: &crate::db::Db, name: &str) -> i64 {
     upsert(
         db,
@@ -497,6 +917,7 @@ fn create_oauth_provider_for_cas_test(db: &crate::db::Db, name: &str) -> i64 {
             cost_multiplier: 1.0,
             priority: Some(100),
             claude_models: None,
+            model_policy: None,
             limit_5h_usd: None,
             limit_daily_usd: None,
             daily_reset_mode: Some(DailyResetMode::Fixed),
@@ -509,10 +930,135 @@ fn create_oauth_provider_for_cas_test(db: &crate::db::Db, name: &str) -> i64 {
             source_provider_id: None,
             bridge_type: None,
             stream_idle_timeout_seconds: None,
+            extension_values: None,
         },
     )
     .expect("create oauth provider")
     .id
+}
+
+#[test]
+fn provider_model_policy_round_trips_and_invalid_rows_fail_closed() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db =
+        crate::db::init_for_tests(&dir.path().join("provider-model-policy.db")).expect("init db");
+    let mut params = default_provider_params("model-policy-ready");
+    params.model_policy = Some(
+        ProviderModelPolicyV1 {
+            version: 1,
+            mode: ProviderModelMode::Selected,
+            model_patterns: vec![],
+            mappings: vec![ProviderModelMapping {
+                source: "gpt-*".to_string(),
+                target: "upstream-*".to_string(),
+            }],
+        }
+        .normalized()
+        .expect("valid model policy"),
+    );
+
+    let saved = upsert(&db, params).expect("save model policy");
+    assert_eq!(saved.model_policy_status, ProviderModelPolicyStatus::Ready);
+    assert_eq!(
+        saved
+            .model_policy
+            .as_ref()
+            .unwrap()
+            .resolve_mapping("gpt-5"),
+        "upstream-5"
+    );
+
+    let conn = db.open_connection().expect("open db");
+    conn.execute(
+        "UPDATE providers SET model_policy_json = ?1 WHERE id = ?2",
+        rusqlite::params![r#"{"version":99,"mode":"all","rules":[]}"#, saved.id],
+    )
+    .expect("corrupt policy");
+    let invalid = get_by_id(&conn, saved.id).expect("read invalid provider");
+    assert_eq!(invalid.model_policy, None);
+    assert_eq!(
+        invalid.model_policy_status,
+        ProviderModelPolicyStatus::Invalid
+    );
+}
+
+#[test]
+fn non_claude_null_model_policy_is_invalid() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = crate::db::init_for_tests(&dir.path().join("provider-model-policy-null.db"))
+        .expect("init db");
+    let mut params = default_provider_params("model-policy-null");
+    params.cli_key = "codex".to_string();
+    params.model_policy = Some(ProviderModelPolicyV1::all());
+    let saved = upsert(&db, params).expect("save codex provider");
+
+    let conn = db.open_connection().expect("open db");
+    conn.execute(
+        "UPDATE providers SET model_policy_json = NULL WHERE id = ?1",
+        rusqlite::params![saved.id],
+    )
+    .expect("clear policy");
+    let invalid = get_by_id(&conn, saved.id).expect("read invalid provider");
+    assert_eq!(invalid.model_policy, None);
+    assert_eq!(
+        invalid.model_policy_status,
+        ProviderModelPolicyStatus::Invalid
+    );
+}
+
+#[test]
+fn provider_model_policy_preserves_legacy_fields_until_explicit_cutover() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let db = crate::db::init_for_tests(&dir.path().join("provider-model-policy-legacy.db"))
+        .expect("init db");
+    let saved =
+        upsert(&db, default_provider_params("model-policy-legacy")).expect("save legacy provider");
+    let conn = db.open_connection().expect("open db");
+    conn.execute(
+        "UPDATE providers SET supported_models_json = ?1, model_mapping_json = ?2 WHERE id = ?3",
+        rusqlite::params![r#"{"legacy":1}"#, r#"{"legacy":2}"#, saved.id],
+    )
+    .expect("seed legacy fields");
+    drop(conn);
+
+    let mut ordinary_edit = default_provider_params("model-policy-legacy");
+    ordinary_edit.provider_id = Some(saved.id);
+    ordinary_edit.name = "legacy-renamed".to_string();
+    let renamed = upsert(&db, ordinary_edit).expect("save ordinary legacy edit");
+    assert_eq!(
+        renamed.model_policy_status,
+        ProviderModelPolicyStatus::Legacy
+    );
+
+    let conn = db.open_connection().expect("open db");
+    let legacy_fields: (Option<String>, Option<String>, Option<String>) = conn
+        .query_row(
+            "SELECT model_policy_json, supported_models_json, model_mapping_json FROM providers WHERE id = ?1",
+            rusqlite::params![saved.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read legacy fields");
+    assert_eq!(legacy_fields.0, None);
+    assert_eq!(legacy_fields.1.as_deref(), Some(r#"{"legacy":1}"#));
+    assert_eq!(legacy_fields.2.as_deref(), Some(r#"{"legacy":2}"#));
+    drop(conn);
+
+    let mut cutover = default_provider_params("legacy-renamed");
+    cutover.provider_id = Some(saved.id);
+    cutover.model_policy = Some(ProviderModelPolicyV1::all());
+    let ready = upsert(&db, cutover).expect("cut over legacy provider");
+    assert_eq!(ready.model_policy_status, ProviderModelPolicyStatus::Ready);
+    let conn = db.open_connection().expect("open db");
+    let preserved: (Option<String>, String, String) = conn
+        .query_row(
+            "SELECT model_policy_json, supported_models_json, model_mapping_json FROM providers WHERE id = ?1",
+            rusqlite::params![saved.id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .expect("read cutover fields");
+    assert!(preserved.0.is_some());
+    assert_eq!(preserved.1, r#"{"legacy":1}"#);
+    assert_eq!(preserved.2, r#"{"legacy":2}"#);
 }
 
 #[test]

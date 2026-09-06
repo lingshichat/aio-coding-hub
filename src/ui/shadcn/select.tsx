@@ -1,25 +1,21 @@
-import { forwardRef } from "react";
 import { cn } from "@/ui/shadcn/utils";
 
-export type SelectProps = React.SelectHTMLAttributes<HTMLSelectElement> & {
+export type SelectProps = React.ComponentPropsWithRef<"select"> & {
   mono?: boolean;
 };
 
-export const Select = forwardRef<HTMLSelectElement, SelectProps>(function Select(
-  { className, mono, ...props },
-  ref
-) {
+export function Select({ className, mono, ref, ...props }: SelectProps) {
   return (
     <select
       ref={ref}
       className={cn(
-        "h-10 w-full rounded-lg border border-input bg-card px-3 text-sm text-foreground shadow-sm outline-none transition",
-        "focus:border-ring focus:ring-2 focus:ring-ring/20",
-        "disabled:cursor-not-allowed disabled:opacity-50",
+        "h-10 w-full rounded-lg border border-line bg-surface-inset px-3 text-sm text-foreground outline-none transition-colors",
+        "focus:border-ring focus:bg-surface-panel focus:ring-2 focus:ring-ring/30 focus:ring-offset-2 focus:ring-offset-background",
+        "disabled:cursor-not-allowed disabled:bg-surface-muted disabled:opacity-60",
         mono ? "font-mono" : null,
         className
       )}
       {...props}
     />
   );
-});
+}

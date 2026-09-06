@@ -2,9 +2,10 @@
 
 use super::*;
 use crate::domain::provider_oauth_limits;
+use crate::gateway::plugins::context::{GatewayPluginHookName, GatewayResponseHookInput};
 use crate::gateway::proxy::{
-    gemini_oauth, is_fake_200_non_stream_body, protocol_bridge, provider_router,
-    upstream_client_error_rules, GatewayErrorCode,
+    detect_fake_200_non_stream_body, gemini_oauth, protocol_bridge, provider_router,
+    upstream_client_error_rules, Fake200Profile, GatewayErrorCode,
 };
 
 fn buffer_cx2cc_event_stream_as_json(
@@ -386,6 +387,7 @@ where
         gemini_oauth_response_mode,
         cx2cc_active,
         anthropic_stream_requested,
+        ..
     } = attempt_ctx;
     let selection_method = dc::selection_method(provider_index, retry_index, session_reuse);
     let reason_code = dc::success_reason_code(provider_index, retry_index);
@@ -432,6 +434,14 @@ where
                     circuit_state_after: None,
                     circuit_failure_count: Some(circuit_before.failure_count),
                     circuit_failure_threshold: Some(circuit_before.failure_threshold),
+                    circuit_recover_at_unix: None,
+                    circuit_trigger_error_code: None,
+                    provider_bridged: Some(provider_ctx_owned.provider_bridged),
+                    timeout_secs: None,
+                    reasoning_effort: attempt_ctx.reasoning_effort.map(str::to_string),
+                    upstream_sent: attempt_ctx.upstream_sent,
+                    claude_model_mapping: provider_ctx_owned.claude_model_mapping.clone(),
+                    model_redirect: provider_ctx_owned.model_redirect.clone(),
                 });
 
                 emit_attempt_event_and_log_with_circuit_before(
@@ -445,6 +455,7 @@ where
 
                 codex_service_tier::append_result_if_detected(
                     common.cli_key.as_str(),
+                    common.codex_priority_billing_source,
                     common.introspection_body.as_slice(),
                     None,
                     &common.special_settings,
@@ -520,6 +531,14 @@ where
                     circuit_state_after: None,
                     circuit_failure_count: Some(circuit_before.failure_count),
                     circuit_failure_threshold: Some(circuit_before.failure_threshold),
+                    circuit_recover_at_unix: None,
+                    circuit_trigger_error_code: None,
+                    provider_bridged: Some(provider_ctx_owned.provider_bridged),
+                    timeout_secs: None,
+                    reasoning_effort: attempt_ctx.reasoning_effort.map(str::to_string),
+                    upstream_sent: attempt_ctx.upstream_sent,
+                    claude_model_mapping: provider_ctx_owned.claude_model_mapping.clone(),
+                    model_redirect: provider_ctx_owned.model_redirect.clone(),
                 });
 
                 emit_attempt_event_and_log_with_circuit_before(
@@ -533,6 +552,7 @@ where
 
                 codex_service_tier::append_result_if_detected(
                     common.cli_key.as_str(),
+                    common.codex_priority_billing_source,
                     common.introspection_body.as_slice(),
                     None,
                     &common.special_settings,
@@ -648,6 +668,7 @@ where
                 decision,
                 outcome,
                 reason: kind.reason(MAX_NON_SSE_BODY_BYTES),
+                timeout_secs: None,
             })
             .await;
         }
@@ -676,6 +697,14 @@ where
         circuit_state_after: None,
         circuit_failure_count: Some(circuit_before.failure_count),
         circuit_failure_threshold: Some(circuit_before.failure_threshold),
+        circuit_recover_at_unix: None,
+        circuit_trigger_error_code: None,
+        provider_bridged: Some(provider_ctx_owned.provider_bridged),
+        timeout_secs: None,
+        reasoning_effort: attempt_ctx.reasoning_effort.map(str::to_string),
+        upstream_sent: attempt_ctx.upstream_sent,
+        claude_model_mapping: provider_ctx_owned.claude_model_mapping.clone(),
+        model_redirect: provider_ctx_owned.model_redirect.clone(),
     });
 
     emit_attempt_event_and_log_with_circuit_before(
@@ -730,6 +759,7 @@ where
                     decision,
                     outcome,
                     reason: format!("cx2cc event-stream aggregation failed: {err}"),
+                    timeout_secs: None,
                 })
                 .await;
             }
@@ -885,6 +915,7 @@ where
                 decision,
                 outcome,
                 reason: format!("cx2cc response translation failed: {err}"),
+                timeout_secs: None,
             })
             .await;
         }
@@ -907,9 +938,51 @@ where
         body_bytes = outcome.body;
     }
 
-    if (200..300).contains(&status.as_u16()) && is_fake_200_non_stream_body(body_bytes.as_ref()) {
+    if enable_response_fixer_for_this_response
+        && is_direct_responses_client(common.cli_key.as_str(), common.forwarded_path.as_str())
+        && response_content_type_is_json(&response_headers)
+    {
+        if let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(&body_bytes) {
+            let fixes =
+                crate::gateway::response_output_normalizer::normalize_response_output_payload(
+                    &mut payload,
+                );
+            if !fixes.is_empty() {
+                if let Ok(normalized) = serde_json::to_vec(&payload) {
+                    body_bytes = Bytes::from(normalized);
+                    response_headers.remove(header::CONTENT_LENGTH);
+                    response_headers.remove(header::CONTENT_ENCODING);
+                    response_fixer::push_special_setting(
+                        &common.special_settings,
+                        serde_json::json!({
+                            "type": "response_output_normalizer",
+                            "scope": "response",
+                            "hit": true,
+                            "paths": fixes,
+                        }),
+                    );
+                }
+            }
+        }
+    }
+
+    let fake_200_detection = (200..300).contains(&status.as_u16()).then(|| {
+        detect_fake_200_non_stream_body(
+            body_bytes.as_ref(),
+            Fake200Profile::for_request(common.cli_key.as_str(), common.forwarded_path.as_str()),
+        )
+    });
+    if let Some(detection) = fake_200_detection.flatten() {
         let error_code = GatewayErrorCode::Fake200.as_str();
         let duration_ms = started.elapsed().as_millis();
+        response_fixer::push_special_setting(
+            &common.special_settings,
+            serde_json::json!({
+                "type": "fake_200_detection",
+                "scope": "response",
+                "reason_code": detection.reason.as_str(),
+            }),
+        );
         let quota_exhausted =
             upstream_client_error_rules::match_quota_exhausted(body_bytes.as_ref());
         let oauth_quota_exhausted = quota_exhausted && provider_ctx_owned.auth_mode == "oauth";
@@ -926,9 +999,15 @@ where
             last.error_code = Some(error_code);
             last.decision = Some(decision.as_str());
             last.reason = Some(if quota_exhausted {
-                "successful HTTP status with quota exhausted error body".to_string()
+                format!(
+                    "successful HTTP status with quota exhausted error body ({})",
+                    detection.reason.as_str()
+                )
             } else {
-                "successful HTTP status with error body".to_string()
+                format!(
+                    "successful HTTP status with error body ({})",
+                    detection.reason.as_str()
+                )
             });
             last.reason_code = Some(ErrorCategory::ProviderError.reason_code());
             last.attempt_duration_ms = Some(duration_ms);
@@ -954,7 +1033,8 @@ where
                     provider_ctx_owned.provider_name_base.as_str(),
                     provider_ctx_owned.provider_base_url_base.as_str(),
                     now_unix,
-                ),
+                )
+                .with_provider_health_neutral(common.provider_health_neutral),
             );
             if let Some(last) = attempts.last_mut() {
                 last.circuit_state_after = Some(change.after.state.as_str());
@@ -971,6 +1051,7 @@ where
                     provider_id,
                     now_unix,
                     common.provider_cooldown_secs,
+                    common.provider_health_neutral,
                 );
                 *circuit_snapshot = snap;
             }
@@ -984,7 +1065,13 @@ where
 
         emit_request_event_and_enqueue_request_log(
             RequestEndArgs::from_context(RequestEndContextArgs {
-                deps: RequestEndDeps::new(&state.app, &state.db, &state.log_tx),
+                deps: RequestEndDeps::new(
+                    &state.app,
+                    &state.db,
+                    &state.log_tx,
+                    &state.plugin_pipeline,
+                    &state.active_requests,
+                ),
                 trace_id: common.trace_id.as_str(),
                 cli_key: common.cli_key.as_str(),
                 method: common.method_hint.as_str(),
@@ -1022,10 +1109,70 @@ where
 
     codex_service_tier::append_result_if_detected(
         common.cli_key.as_str(),
+        common.codex_priority_billing_source,
         common.introspection_body.as_slice(),
         Some(body_bytes.as_ref()),
         &common.special_settings,
     );
+
+    let hook_input = GatewayResponseHookInput {
+        hook_name: GatewayPluginHookName::ResponseAfter,
+        trace_id: common.trace_id.clone(),
+        status: status.as_u16(),
+        headers: response_headers.clone(),
+        body: body_bytes.clone(),
+    };
+    match state.plugin_pipeline.run_response_hook(hook_input).await {
+        Ok(output) => {
+            crate::gateway::plugins::audit::persist_gateway_plugin_diagnostics(
+                &state.db,
+                &common.trace_id,
+                output.audit_events.clone(),
+                output.execution_reports.clone(),
+            );
+            if let Some(blocked) = output.blocked {
+                tracing::warn!(
+                    trace_id = %common.trace_id,
+                    provider_id,
+                    status = blocked.status,
+                    reason = %blocked.reason,
+                    "plugin blocked gateway response after upstream success"
+                );
+                abort_guard.disarm();
+                return LoopControl::Return(error_response(
+                    StatusCode::BAD_GATEWAY,
+                    common.trace_id.clone(),
+                    GatewayErrorCode::InternalError.as_str(),
+                    blocked.reason,
+                    attempts.clone(),
+                ));
+            }
+            response_headers = output.headers;
+            body_bytes = output.body;
+            response_headers.remove(header::CONTENT_LENGTH);
+        }
+        Err(mut err) => {
+            crate::gateway::plugins::audit::persist_gateway_plugin_error_audit_events(
+                &state.db,
+                &common.trace_id,
+                &mut err,
+            );
+            tracing::warn!(
+                trace_id = %common.trace_id,
+                provider_id,
+                "plugin response.after hook failed: {}",
+                err
+            );
+            abort_guard.disarm();
+            return LoopControl::Return(error_response(
+                StatusCode::BAD_GATEWAY,
+                common.trace_id.clone(),
+                GatewayErrorCode::InternalError.as_str(),
+                format!("gateway plugin response hook failed: {err}"),
+                attempts.clone(),
+            ));
+        }
+    }
 
     let usage = usage::parse_usage_from_json_or_sse_bytes(common.cli_key.as_str(), &body_bytes);
     let usage_metrics = usage.as_ref().map(|u| u.metrics.clone());
@@ -1072,7 +1219,8 @@ where
                 provider_ctx_owned.provider_name_base.as_str(),
                 provider_ctx_owned.provider_base_url_base.as_str(),
                 now_unix,
-            ),
+            )
+            .with_provider_health_neutral(common.provider_health_neutral),
         );
         if let Some(last) = attempts.last_mut() {
             last.circuit_state_after = Some(change.after.state.as_str());
@@ -1095,7 +1243,13 @@ where
     let duration_ms = started.elapsed().as_millis();
     emit_request_event_and_enqueue_request_log(
         RequestEndArgs::from_context(RequestEndContextArgs {
-            deps: RequestEndDeps::new(&state.app, &state.db, &state.log_tx),
+            deps: RequestEndDeps::new(
+                &state.app,
+                &state.db,
+                &state.log_tx,
+                &state.plugin_pipeline,
+                &state.active_requests,
+            ),
             trace_id: common.trace_id.as_str(),
             cli_key: common.cli_key.as_str(),
             method: common.method_hint.as_str(),
@@ -1124,12 +1278,29 @@ where
     LoopControl::Return(out)
 }
 
+fn is_direct_responses_client(cli_key: &str, path: &str) -> bool {
+    matches!(cli_key, "codex" | "grok")
+        && matches!(path.trim_end_matches('/'), "/responses" | "/v1/responses")
+}
+
+fn response_content_type_is_json(headers: &HeaderMap) -> bool {
+    headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| {
+            let lower = value.to_ascii_lowercase();
+            lower.contains("application/json") || lower.contains("+json")
+        })
+        .unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         buffer_cx2cc_event_stream_as_json, classify_cx2cc_success_payload,
-        read_non_stream_body_with_limit, should_passthrough_non_stream_success,
-        translate_cx2cc_non_stream_body, Cx2ccSuccessPayloadKind, NonStreamBodyReadError,
+        is_direct_responses_client, read_non_stream_body_with_limit, response_content_type_is_json,
+        should_passthrough_non_stream_success, translate_cx2cc_non_stream_body,
+        Cx2ccSuccessPayloadKind, NonStreamBodyReadError,
     };
     use crate::domain::usage;
     use axum::body::Bytes;
@@ -1198,6 +1369,46 @@ mod tests {
             .await
             .expect("response");
         (response, task)
+    }
+
+    #[test]
+    fn response_output_normalizer_gate_accepts_only_direct_codex_and_grok_responses_json() {
+        for cli_key in ["codex", "grok"] {
+            for path in [
+                "/responses",
+                "/responses/",
+                "/v1/responses",
+                "/v1/responses/",
+            ] {
+                assert!(is_direct_responses_client(cli_key, path));
+            }
+        }
+        for (cli_key, path) in [
+            ("claude", "/v1/responses"),
+            ("gemini", "/v1/responses"),
+            ("codex", "/v1/chat/completions"),
+            ("grok", "/v1/responses/extra"),
+        ] {
+            assert!(!is_direct_responses_client(cli_key, path));
+        }
+
+        let mut headers = HeaderMap::new();
+        assert!(!response_content_type_is_json(&headers));
+        for content_type in [
+            "application/json",
+            "application/problem+json; charset=utf-8",
+        ] {
+            headers.insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_str(content_type).expect("content type"),
+            );
+            assert!(response_content_type_is_json(&headers));
+        }
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/event-stream"),
+        );
+        assert!(!response_content_type_is_json(&headers));
     }
 
     #[tokio::test(flavor = "current_thread")]

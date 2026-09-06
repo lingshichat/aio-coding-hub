@@ -1,6 +1,6 @@
 //! Usage: Request log persistence (sqlite buffered writer and queries).
 
-use crate::shared::error::db_err;
+use crate::shared::error::{db_err, AppResult};
 use crate::shared::time::now_unix_seconds;
 use crate::{cost, db, model_price_aliases};
 use rusqlite::{params, params_from_iter, ErrorCode, OptionalExtension, TransactionBehavior};
@@ -20,6 +20,8 @@ pub use types::{
 mod costing;
 use costing::{has_any_cost_usage, is_success_status, usage_for_cost};
 
+pub(crate) mod semantics;
+
 mod queries;
 use queries::{final_provider_from_attempts, parse_attempts, validate_cli_key};
 pub use queries::{
@@ -36,6 +38,9 @@ const INSERT_RETRY_MAX_DELAY_MS: u64 = 500;
 const COST_MULTIPLIER_CACHE_MAX_ENTRIES: usize = 256;
 const MODEL_PRICE_CACHE_MAX_ENTRIES: usize = 512;
 const CACHE_TTL_SECS: i64 = 5 * 60;
+const REQUEST_INTERRUPTED_BY_RESTART_ERROR_CODE: &str = "GW_REQUEST_INTERRUPTED_BY_RESTART";
+const REQUEST_INTERRUPTED_BY_GATEWAY_STOP_ERROR_CODE: &str =
+    "GW_REQUEST_INTERRUPTED_BY_GATEWAY_STOP";
 const EFFECTIVE_COST_MULTIPLIER_SQL: &str = r#"
 SELECT COALESCE(source.cost_multiplier, bridge.cost_multiplier)
 FROM providers bridge
@@ -44,6 +49,28 @@ WHERE bridge.id = ?1
 "#;
 
 static WRITE_THROUGH_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RequestLogReconcileReason {
+    StartupRecovery,
+    GatewayStop,
+}
+
+impl RequestLogReconcileReason {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartupRecovery => "startup_recovery",
+            Self::GatewayStop => "gateway_stop",
+        }
+    }
+
+    const fn error_code(self) -> &'static str {
+        match self {
+            Self::StartupRecovery => REQUEST_INTERRUPTED_BY_RESTART_ERROR_CODE,
+            Self::GatewayStop => REQUEST_INTERRUPTED_BY_GATEWAY_STOP_ERROR_CODE,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DbWriteErrorKind {
@@ -211,13 +238,13 @@ fn fetch_model_price_json(
 }
 
 #[derive(Debug, Clone)]
-struct EffectiveCostBasis {
-    cli_key: String,
-    model: String,
+pub(crate) struct EffectiveCostBasis {
+    pub(crate) cli_key: String,
+    pub(crate) model: String,
 }
 
 /// Parse `effectivePriority` from `codex_service_tier_result` special setting.
-fn parse_effective_priority(special_settings_json: Option<&str>) -> bool {
+pub(crate) fn parse_effective_priority(special_settings_json: Option<&str>) -> bool {
     let raw = match special_settings_json {
         Some(s) => s.trim(),
         None => return false,
@@ -257,58 +284,52 @@ fn parse_effective_priority(special_settings_json: Option<&str>) -> bool {
 
 pub(crate) fn parse_cx2cc_cost_basis(
     special_settings_json: Option<&str>,
+    final_provider_id: Option<i64>,
 ) -> Option<(String, String)> {
-    let raw = special_settings_json?.trim();
-    if raw.is_empty() {
+    let semantics::Cx2ccCostBasisResolution::Matched(basis) =
+        semantics::resolve_cx2cc_cost_basis(special_settings_json, final_provider_id)
+    else {
         return None;
-    }
-
-    let settings: Vec<Value> = serde_json::from_str(raw).ok()?;
-    for setting in settings.iter().rev() {
-        let Some(obj) = setting.as_object() else {
-            continue;
-        };
-        if obj.get("type").and_then(Value::as_str) != Some("cx2cc_cost_basis") {
-            continue;
-        }
-
-        let Some(cli_key) = obj
-            .get("source_cli_key")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-        let Some(model) = obj
-            .get("priced_model")
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-        else {
-            continue;
-        };
-
-        return Some((cli_key.to_string(), model.to_string()));
-    }
-
-    None
+    };
+    Some((basis.source_cli_key, basis.priced_model?))
 }
 
-fn effective_cost_basis(item: &RequestLogInsert) -> Option<EffectiveCostBasis> {
-    if let Some((cli_key, model)) = parse_cx2cc_cost_basis(item.special_settings_json.as_deref()) {
+#[cfg(test)]
+pub(crate) fn cx2cc_openai_input_semantics_override(
+    special_settings_json: Option<&str>,
+    final_provider_id: Option<i64>,
+) -> Option<bool> {
+    semantics::resolve_cx2cc_cost_basis(special_settings_json, final_provider_id)
+        .openai_input_semantics_override()
+}
+
+pub(crate) fn effective_cost_basis(
+    cli_key: &str,
+    requested_model: Option<&str>,
+    special_settings_json: Option<&str>,
+    final_provider_id: Option<i64>,
+) -> Option<EffectiveCostBasis> {
+    if let Some((cli_key, model)) = parse_cx2cc_cost_basis(special_settings_json, final_provider_id)
+    {
         return Some(EffectiveCostBasis { cli_key, model });
     }
 
-    let model = item
-        .requested_model
-        .as_deref()
+    if let Some(model) =
+        semantics::resolve_model_redirect_target(special_settings_json, final_provider_id)
+    {
+        return Some(EffectiveCostBasis {
+            cli_key: cli_key.to_string(),
+            model,
+        });
+    }
+
+    let model = requested_model
         .map(str::trim)
         .filter(|v| !v.is_empty())?
         .to_string();
 
     Some(EffectiveCostBasis {
-        cli_key: item.cli_key.clone(),
+        cli_key: cli_key.to_string(),
         model,
     })
 }
@@ -363,6 +384,153 @@ pub fn spawn_write_through<R: tauri::Runtime>(
         }
     });
     true
+}
+
+pub(crate) fn touch_activity(
+    db: &db::Db,
+    trace_id: &str,
+    cli_key: &str,
+    last_activity_ms: i64,
+    details: Option<String>,
+) -> AppResult<usize> {
+    validate_cli_key(cli_key).map_err(crate::shared::error::AppError::from)?;
+    let last_activity_ms = last_activity_ms.max(0);
+    let conn = db.open_connection()?;
+    conn.execute(
+        r#"
+UPDATE request_logs
+SET
+  last_activity_ms = CASE
+    WHEN last_activity_ms IS NULL OR ?3 > last_activity_ms THEN ?3
+    ELSE last_activity_ms
+  END,
+  activity_details_json = CASE
+    WHEN last_activity_ms IS NULL OR ?3 >= last_activity_ms THEN COALESCE(?4, activity_details_json)
+    ELSE activity_details_json
+  END
+WHERE trace_id = ?1
+  AND cli_key = ?2
+  AND status IS NULL
+  AND error_code IS NULL
+"#,
+        params![trace_id, cli_key, last_activity_ms, details],
+    )
+    .map_err(|e| db_err!("failed to touch request log activity: {e}"))
+}
+
+const RETENTION_PURGE_BATCH_SIZE: usize = 1000;
+const RETENTION_PURGE_BATCH_PAUSE_MS: u64 = 50;
+const RETENTION_TASK_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
+/// Deletes request logs older than `retention_days`, in small batches so the
+/// write lock is never held long (WAL-friendly). `retention_days == 0` means
+/// retention is disabled (keep forever) and nothing is deleted.
+pub fn purge_expired(db: &db::Db, retention_days: u32, now_unix: i64) -> AppResult<u64> {
+    if retention_days == 0 {
+        return Ok(0);
+    }
+    let cutoff = now_unix.saturating_sub(i64::from(retention_days).saturating_mul(24 * 60 * 60));
+    let mut total: u64 = 0;
+    loop {
+        // Re-acquire per batch so the pooled connection (pool max is small) is
+        // not held across the inter-batch pauses of a long purge.
+        let conn = db.open_connection()?;
+        let deleted = conn
+            .execute(
+                "DELETE FROM request_logs WHERE id IN (
+                   SELECT id FROM request_logs WHERE created_at < ?1 LIMIT ?2
+                 )",
+                params![cutoff, RETENTION_PURGE_BATCH_SIZE as i64],
+            )
+            .map_err(|e| db_err!("failed to purge expired request_logs: {e}"))?;
+        drop(conn);
+        total = total.saturating_add(deleted as u64);
+        if deleted < RETENTION_PURGE_BATCH_SIZE {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(RETENTION_PURGE_BATCH_PAUSE_MS));
+    }
+    Ok(total)
+}
+
+/// Spawns the daily request-log retention job (idempotent). Reads the setting
+/// fresh on each tick — fail-open to disabled — so changes apply without a
+/// restart. Lives at app level, not in the gateway: retention must not depend
+/// on the gateway running.
+pub(crate) fn spawn_retention_task(app: tauri::AppHandle, db: db::Db) {
+    static STARTED: OnceLock<()> = OnceLock::new();
+    if STARTED.set(()).is_err() {
+        return;
+    }
+
+    tauri::async_runtime::spawn(async move {
+        run_retention_once(&app, &db).await;
+
+        let mut interval = tokio::time::interval(RETENTION_TASK_INTERVAL);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        // First tick is immediate; skip it so we don't run twice at startup.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            run_retention_once(&app, &db).await;
+        }
+    });
+}
+
+async fn run_retention_once(app: &tauri::AppHandle, db: &db::Db) {
+    let app = app.clone();
+    let db = db.clone();
+    let result = crate::blocking::run("request_log_retention", move || {
+        let retention_days = crate::settings::request_log_retention_days_fail_open(&app);
+        if retention_days == 0 {
+            return Ok::<u64, crate::shared::error::AppError>(0);
+        }
+        let deleted = purge_expired(&db, retention_days, now_unix_seconds())?;
+        if deleted > 0 {
+            tracing::info!(retention_days, deleted, "purged expired request logs");
+        }
+        Ok(deleted)
+    })
+    .await;
+
+    if let Err(err) = result {
+        tracing::warn!("request-log retention task failed: {}", err);
+    }
+}
+
+pub(crate) fn reconcile_unresolved_pending(
+    db: &db::Db,
+    reason: RequestLogReconcileReason,
+    now_ms: i64,
+) -> AppResult<usize> {
+    let now_ms = now_ms.max(0);
+    let conn = db.open_connection()?;
+    let pending_age_expr =
+        "CASE WHEN created_at_ms > 0 AND ?1 > created_at_ms THEN ?1 - created_at_ms ELSE 0 END";
+    let sql = format!(
+        r#"
+UPDATE request_logs
+SET
+  status = 499,
+  error_code = ?2,
+  duration_ms = CASE
+    WHEN COALESCE(duration_ms, 0) > {pending_age_expr} THEN COALESCE(duration_ms, 0)
+    ELSE {pending_age_expr}
+  END,
+  excluded_from_stats = 1,
+  error_details_json = json_object(
+    'reason', ?3,
+    'reconciled_at_ms', ?1,
+    'pending_age_ms', {pending_age_expr}
+  )
+WHERE status IS NULL
+  AND error_code IS NULL
+"#
+    );
+    let affected = conn
+        .execute(&sql, params![now_ms, reason.error_code(), reason.as_str()])
+        .map_err(|e| db_err!("failed to reconcile pending request_logs: {e}"))?;
+    Ok(affected)
 }
 
 fn writer_loop<R: tauri::Runtime>(
@@ -450,8 +618,13 @@ fn insert_batch_once(
                 .map_err(|e| {
                     DbWriteError::from_rusqlite("failed to prepare cost_multiplier query", e)
                 })?;
+        // Prices are stored once per model (keyed by the vendor's natural CLI); prefer an exact
+        // cli_key match (manual overrides) and fall back to any CLI's row for the same model.
+        // ponytail: full scan of a few-hundred-row table; add idx(model) if it ever shows up.
         let mut stmt_price_json = tx
-            .prepare_cached("SELECT price_json FROM model_prices WHERE cli_key = ?1 AND model = ?2")
+            .prepare_cached(
+                "SELECT price_json FROM model_prices WHERE model = ?2 ORDER BY (cli_key = ?1) DESC LIMIT 1",
+            )
             .map_err(|e| DbWriteError::from_rusqlite("failed to prepare model_price query", e))?;
 
         let mut stmt = tx
@@ -483,11 +656,13 @@ fn insert_batch_once(
 		  cost_usd_femto,
 		  cost_multiplier,
 		  created_at_ms,
+		  last_activity_ms,
+		  activity_details_json,
 		  created_at,
 		  final_provider_id,
 		  provider_chain_json,
 		  error_details_json
-		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29)
+		) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31)
 		ON CONFLICT(trace_id) DO UPDATE SET
 		  method = excluded.method,
 		  path = excluded.path,
@@ -515,10 +690,21 @@ fn insert_batch_once(
 		    WHEN request_logs.created_at_ms = 0 THEN excluded.created_at_ms
 		    ELSE request_logs.created_at_ms
 		  END,
+		  last_activity_ms = CASE
+		    WHEN request_logs.last_activity_ms IS NULL THEN excluded.last_activity_ms
+		    WHEN excluded.last_activity_ms > request_logs.last_activity_ms THEN excluded.last_activity_ms
+		    ELSE request_logs.last_activity_ms
+		  END,
+		  activity_details_json = COALESCE(request_logs.activity_details_json, excluded.activity_details_json),
 		  created_at = CASE WHEN request_logs.created_at = 0 THEN excluded.created_at ELSE request_logs.created_at END,
 		  final_provider_id = excluded.final_provider_id,
 		  provider_chain_json = excluded.provider_chain_json,
 		  error_details_json = excluded.error_details_json
+		WHERE NOT (
+		  (request_logs.status IS NOT NULL OR request_logs.error_code IS NOT NULL)
+		  AND excluded.status IS NULL
+		  AND excluded.error_code IS NULL
+		)
 		"#,
             )
             .map_err(|e| DbWriteError::from_rusqlite("failed to prepare insert", e))?;
@@ -556,7 +742,12 @@ fn insert_batch_once(
             };
 
             let cost_usd_femto = if is_success_status(item.status, item.error_code.as_deref()) {
-                match effective_cost_basis(item) {
+                match effective_cost_basis(
+                    &item.cli_key,
+                    item.requested_model.as_deref(),
+                    item.special_settings_json.as_deref(),
+                    final_provider_id_db,
+                ) {
                     Some(cost_basis) => {
                         let usage = usage_for_cost(item);
                         if !has_any_cost_usage(&usage) {
@@ -646,6 +837,8 @@ fn insert_batch_once(
                 cost_usd_femto,
                 cost_multiplier,
                 item.created_at_ms,
+                item.last_activity_ms.unwrap_or(item.created_at_ms),
+                item.activity_details_json,
                 item.created_at,
                 final_provider_id_db,
                 item.provider_chain_json,
@@ -688,7 +881,7 @@ SELECT
   COUNT(1) AS request_count,
   SUM(COALESCE(input_tokens, 0)) AS total_input_tokens,
   SUM(COALESCE(output_tokens, 0)) AS total_output_tokens,
-  SUM(COALESCE(cost_usd_femto, 0)) AS total_cost_usd_femto,
+  TOTAL(COALESCE(cost_usd_femto, 0)) AS total_cost_usd_femto,
   SUM(duration_ms) AS total_duration_ms
 FROM request_logs
 WHERE session_id IN ({placeholders})
@@ -726,7 +919,7 @@ GROUP BY cli_key, session_id
         let total_output_tokens: i64 = row
             .get("total_output_tokens")
             .map_err(|e| db_err!("invalid session aggregate total_output_tokens: {e}"))?;
-        let total_cost_usd_femto: i64 = row
+        let total_cost_usd_femto: f64 = row
             .get("total_cost_usd_femto")
             .map_err(|e| db_err!("invalid session aggregate total_cost_usd_femto: {e}"))?;
         let total_duration_ms: i64 = row
@@ -739,7 +932,7 @@ GROUP BY cli_key, session_id
                 request_count: request_count.max(0),
                 total_input_tokens: total_input_tokens.max(0),
                 total_output_tokens: total_output_tokens.max(0),
-                total_cost_usd_femto: total_cost_usd_femto.max(0),
+                total_cost_usd_femto: total_cost_usd_femto.max(0.0),
                 total_duration_ms: total_duration_ms.max(0),
             },
         );
@@ -751,9 +944,11 @@ GROUP BY cli_key, session_id
 #[cfg(test)]
 mod tests {
     use super::{
-        parse_cx2cc_cost_basis, try_acquire_write_through_permit, writer_loop, InsertBatchCache,
-        RequestLogInsert, COST_MULTIPLIER_CACHE_MAX_ENTRIES, EFFECTIVE_COST_MULTIPLIER_SQL,
-        MODEL_PRICE_CACHE_MAX_ENTRIES, WRITE_BATCH_MAX,
+        aggregate_by_session_ids, effective_cost_basis, insert_batch_once, parse_cx2cc_cost_basis,
+        purge_expired, reconcile_unresolved_pending, touch_activity,
+        try_acquire_write_through_permit, writer_loop, InsertBatchCache, RequestLogInsert,
+        RequestLogReconcileReason, COST_MULTIPLIER_CACHE_MAX_ENTRIES,
+        EFFECTIVE_COST_MULTIPLIER_SQL, MODEL_PRICE_CACHE_MAX_ENTRIES, WRITE_BATCH_MAX,
     };
     use rusqlite::{params, Connection};
     use std::sync::Arc;
@@ -787,6 +982,8 @@ mod tests {
             provider_chain_json: None,
             error_details_json: None,
             created_at_ms: 1_770_000_000_000,
+            last_activity_ms: None,
+            activity_details_json: None,
             created_at: 1_770_000_000,
         }
     }
@@ -803,6 +1000,97 @@ mod tests {
         let conn = db.open_connection().expect("open connection");
         conn.query_row("SELECT COUNT(1) FROM request_logs", [], |row| row.get(0))
             .expect("count request logs")
+    }
+
+    #[test]
+    fn aggregate_by_session_ids_allows_cost_totals_above_i64_max() {
+        const COST_TERM_FEMTO: i64 = 3_i64 << 61;
+
+        let (_app, db, _dir) = init_test_db();
+        let conn = db.open_connection().expect("open connection");
+        for (trace_id, created_at) in [("session-cost-a", 1_i64), ("session-cost-b", 2_i64)] {
+            conn.execute(
+                r#"
+INSERT INTO request_logs (
+  trace_id, cli_key, session_id, method, path, status, error_code, duration_ms,
+  attempts_json, cost_usd_femto, excluded_from_stats, created_at, created_at_ms
+) VALUES (?1, 'codex', 'overflow-session', 'POST', '/v1/responses', 200, NULL, 10,
+  '[]', ?2, 0, ?3, ?4)
+"#,
+                params![
+                    trace_id,
+                    COST_TERM_FEMTO,
+                    created_at,
+                    created_at.saturating_mul(1000)
+                ],
+            )
+            .expect("insert session request log");
+        }
+        drop(conn);
+
+        let aggregates = aggregate_by_session_ids(&db, &["overflow-session".to_string()])
+            .expect("aggregate sessions");
+        let aggregate = aggregates
+            .get(&("codex".to_string(), "overflow-session".to_string()))
+            .expect("session aggregate");
+        let expected = COST_TERM_FEMTO as f64 * 2.0;
+
+        assert_eq!(aggregate.request_count, 2);
+        assert!(aggregate.total_cost_usd_femto.is_finite());
+        assert_eq!(aggregate.total_cost_usd_femto, expected);
+    }
+
+    fn insert_request_log_row(
+        db: &crate::db::Db,
+        trace_id: &str,
+        status: Option<i64>,
+        error_code: Option<&str>,
+        duration_ms: i64,
+        created_at_ms: i64,
+    ) {
+        let conn = db.open_connection().expect("open connection");
+        conn.execute(
+            r#"
+INSERT INTO request_logs (
+  trace_id, cli_key, method, path, status, error_code, duration_ms, attempts_json,
+  created_at, created_at_ms, excluded_from_stats
+) VALUES (?1, 'claude', 'POST', '/v1/messages', ?2, ?3, ?4, '[]', ?5, ?6, 0)
+"#,
+            params![
+                trace_id,
+                status,
+                error_code,
+                duration_ms,
+                created_at_ms.saturating_div(1000),
+                created_at_ms,
+            ],
+        )
+        .expect("insert request log row");
+    }
+
+    fn fetch_lifecycle_row(
+        db: &crate::db::Db,
+        trace_id: &str,
+    ) -> (Option<i64>, Option<String>, i64, i64, Option<String>) {
+        let conn = db.open_connection().expect("open connection");
+        conn.query_row(
+            r#"
+SELECT status, error_code, duration_ms, excluded_from_stats, error_details_json
+FROM request_logs
+WHERE trace_id = ?1
+"#,
+            params![trace_id],
+            |row| {
+                Ok((
+                    row.get(0)?,
+                    row.get(1)?,
+                    row.get(2)?,
+                    row.get(3)?,
+                    row.get(4)?,
+                ))
+            },
+        )
+        .expect("fetch lifecycle row")
     }
 
     #[test]
@@ -864,6 +1152,428 @@ mod tests {
     }
 
     #[test]
+    fn purge_expired_deletes_only_rows_older_than_retention() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        let now_unix = 1_770_000_000_i64;
+        let day_secs = 24 * 60 * 60;
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[
+                RequestLogInsert {
+                    created_at: now_unix - 10 * day_secs,
+                    created_at_ms: (now_unix - 10 * day_secs) * 1000,
+                    ..request_log_insert("trace-purge-old")
+                },
+                RequestLogInsert {
+                    created_at: now_unix - day_secs / 2,
+                    created_at_ms: (now_unix - day_secs / 2) * 1000,
+                    ..request_log_insert("trace-purge-recent")
+                },
+            ],
+            &mut cache,
+        )
+        .expect("insert rows");
+
+        let deleted = purge_expired(&db, 7, now_unix).expect("purge");
+        assert_eq!(deleted, 1);
+        assert_eq!(count_request_logs(&db), 1);
+
+        let conn = db.open_connection().expect("open connection");
+        let remaining: String = conn
+            .query_row("SELECT trace_id FROM request_logs", [], |row| row.get(0))
+            .expect("remaining row");
+        assert_eq!(remaining, "trace-purge-recent");
+    }
+
+    #[test]
+    fn purge_expired_is_disabled_when_retention_is_zero() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        let now_unix = 1_770_000_000_i64;
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                created_at: now_unix - 400 * 24 * 60 * 60,
+                created_at_ms: (now_unix - 400 * 24 * 60 * 60) * 1000,
+                ..request_log_insert("trace-purge-disabled")
+            }],
+            &mut cache,
+        )
+        .expect("insert row");
+
+        let deleted = purge_expired(&db, 0, now_unix).expect("purge disabled");
+        assert_eq!(deleted, 0);
+        assert_eq!(count_request_logs(&db), 1);
+    }
+
+    #[test]
+    fn purge_expired_drains_multiple_batches() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        let now_unix = 1_770_000_000_i64;
+        let old_created_at = now_unix - 30 * 24 * 60 * 60;
+
+        // More rows than one purge batch (batch size 1000) to cover the loop.
+        let rows: Vec<RequestLogInsert> = (0..1100)
+            .map(|index| RequestLogInsert {
+                created_at: old_created_at,
+                created_at_ms: old_created_at * 1000,
+                ..request_log_insert(&format!("trace-purge-batch-{index}"))
+            })
+            .collect();
+        for chunk in rows.chunks(WRITE_BATCH_MAX) {
+            insert_batch_once(&app_handle, &db, chunk, &mut cache).expect("insert chunk");
+        }
+
+        let deleted = purge_expired(&db, 7, now_unix).expect("purge batches");
+        assert_eq!(deleted, 1100);
+        assert_eq!(count_request_logs(&db), 0);
+    }
+
+    #[test]
+    fn request_log_insert_initializes_last_activity_from_created_at() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                status: None,
+                error_code: None,
+                ..request_log_insert("trace-activity-init")
+            }],
+            &mut cache,
+        )
+        .expect("insert placeholder");
+
+        let conn = db.open_connection().expect("open connection");
+        let value: i64 = conn
+            .query_row(
+                "SELECT last_activity_ms FROM request_logs WHERE trace_id = ?1",
+                ["trace-activity-init"],
+                |row| row.get(0),
+            )
+            .expect("read last activity");
+        assert_eq!(value, 1_770_000_000_000);
+    }
+
+    #[test]
+    fn touch_activity_only_updates_pending_rows_and_never_moves_backwards() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                status: None,
+                error_code: None,
+                ..request_log_insert("trace-touch")
+            }],
+            &mut cache,
+        )
+        .expect("insert pending");
+
+        touch_activity(
+            &db,
+            "trace-touch",
+            "claude",
+            1_770_000_030_000,
+            Some(r#"{"chunk_count":1}"#.to_string()),
+        )
+        .expect("touch newer");
+        touch_activity(
+            &db,
+            "trace-touch",
+            "claude",
+            1_770_000_010_000,
+            Some(r#"{"chunk_count":0}"#.to_string()),
+        )
+        .expect("older touch ignored");
+
+        let conn = db.open_connection().expect("open connection");
+        let row: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT last_activity_ms, activity_details_json FROM request_logs WHERE trace_id = ?1",
+                ["trace-touch"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read activity");
+        assert_eq!(row.0, 1_770_000_030_000);
+        assert_eq!(row.1.as_deref(), Some(r#"{"chunk_count":1}"#));
+        drop(conn);
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[request_log_insert("trace-touch")],
+            &mut cache,
+        )
+        .expect("finalize");
+        let changed = touch_activity(&db, "trace-touch", "claude", 1_770_000_060_000, None)
+            .expect("touch completed row");
+        assert_eq!(changed, 0);
+    }
+
+    #[test]
+    fn request_log_finalize_preserves_newer_last_activity_from_insert_payload() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                status: None,
+                error_code: None,
+                ..request_log_insert("trace-final-activity")
+            }],
+            &mut cache,
+        )
+        .expect("insert pending");
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                last_activity_ms: Some(1_770_000_090_000),
+                activity_details_json: Some(r#"{"terminal_signal":"completed"}"#.to_string()),
+                ..request_log_insert("trace-final-activity")
+            }],
+            &mut cache,
+        )
+        .expect("finalize");
+
+        let conn = db.open_connection().expect("open connection");
+        let row: (i64, Option<String>) = conn
+            .query_row(
+                "SELECT last_activity_ms, activity_details_json FROM request_logs WHERE trace_id = ?1",
+                ["trace-final-activity"],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("read activity");
+        assert_eq!(row.0, 1_770_000_090_000);
+        assert_eq!(row.1.as_deref(), Some(r#"{"terminal_signal":"completed"}"#));
+    }
+
+    #[test]
+    fn late_placeholder_does_not_downgrade_terminal_request_log() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let mut cache = InsertBatchCache::default();
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                attempts_json: r#"[{"outcome":"success"}]"#.to_string(),
+                input_tokens: Some(12),
+                output_tokens: Some(34),
+                total_tokens: Some(46),
+                usage_json: Some(r#"{"input_tokens":12,"output_tokens":34}"#.to_string()),
+                requested_model: Some("claude-sonnet-4".to_string()),
+                provider_chain_json: Some(r#"[{"provider":"anthropic"}]"#.to_string()),
+                ..request_log_insert("trace-late-placeholder")
+            }],
+            &mut cache,
+        )
+        .expect("insert terminal");
+
+        insert_batch_once(
+            &app_handle,
+            &db,
+            &[RequestLogInsert {
+                status: None,
+                error_code: None,
+                duration_ms: 0,
+                ttfb_ms: None,
+                attempts_json: "[]".to_string(),
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                usage_json: None,
+                requested_model: None,
+                provider_chain_json: None,
+                error_details_json: None,
+                ..request_log_insert("trace-late-placeholder")
+            }],
+            &mut cache,
+        )
+        .expect("insert late placeholder");
+
+        struct TerminalRow {
+            status: Option<i64>,
+            error_code: Option<String>,
+            duration_ms: i64,
+            ttfb_ms: Option<i64>,
+            input_tokens: Option<i64>,
+            output_tokens: Option<i64>,
+            total_tokens: Option<i64>,
+            attempts_json: String,
+            usage_json: Option<String>,
+            requested_model: Option<String>,
+            provider_chain_json: Option<String>,
+        }
+
+        let conn = db.open_connection().expect("open connection");
+        let row = conn
+            .query_row(
+                r#"
+SELECT
+  status,
+  error_code,
+  duration_ms,
+  ttfb_ms,
+  input_tokens,
+  output_tokens,
+  total_tokens,
+  attempts_json,
+  usage_json,
+  requested_model,
+  provider_chain_json
+FROM request_logs
+WHERE trace_id = ?1
+"#,
+                ["trace-late-placeholder"],
+                |row| {
+                    Ok(TerminalRow {
+                        status: row.get(0)?,
+                        error_code: row.get(1)?,
+                        duration_ms: row.get(2)?,
+                        ttfb_ms: row.get(3)?,
+                        input_tokens: row.get(4)?,
+                        output_tokens: row.get(5)?,
+                        total_tokens: row.get(6)?,
+                        attempts_json: row.get(7)?,
+                        usage_json: row.get(8)?,
+                        requested_model: row.get(9)?,
+                        provider_chain_json: row.get(10)?,
+                    })
+                },
+            )
+            .expect("read request log");
+
+        assert_eq!(row.status, Some(200));
+        assert_eq!(row.error_code, None);
+        assert_eq!(row.duration_ms, 10);
+        assert_eq!(row.ttfb_ms, Some(5));
+        assert_eq!(row.input_tokens, Some(12));
+        assert_eq!(row.output_tokens, Some(34));
+        assert_eq!(row.total_tokens, Some(46));
+        assert_eq!(row.attempts_json, r#"[{"outcome":"success"}]"#);
+        assert_eq!(
+            row.usage_json.as_deref(),
+            Some(r#"{"input_tokens":12,"output_tokens":34}"#)
+        );
+        assert_eq!(row.requested_model.as_deref(), Some("claude-sonnet-4"));
+        assert_eq!(
+            row.provider_chain_json.as_deref(),
+            Some(r#"[{"provider":"anthropic"}]"#)
+        );
+    }
+
+    #[test]
+    fn reconcile_unresolved_pending_marks_only_pending_rows() {
+        let (_app, db, _dir) = init_test_db();
+        insert_request_log_row(&db, "trace-pending", None, None, 10, 1_000);
+        insert_request_log_row(&db, "trace-success", Some(200), None, 20, 2_000);
+        insert_request_log_row(
+            &db,
+            "trace-failed",
+            None,
+            Some("GW_UPSTREAM_TIMEOUT"),
+            30,
+            3_000,
+        );
+
+        let affected =
+            reconcile_unresolved_pending(&db, RequestLogReconcileReason::StartupRecovery, 11_000)
+                .expect("reconcile pending rows");
+
+        assert_eq!(affected, 1);
+        assert_eq!(
+            fetch_lifecycle_row(&db, "trace-pending"),
+            (
+                Some(499),
+                Some("GW_REQUEST_INTERRUPTED_BY_RESTART".to_string()),
+                10_000,
+                1,
+                Some(
+                    r#"{"reason":"startup_recovery","reconciled_at_ms":11000,"pending_age_ms":10000}"#
+                        .to_string()
+                )
+            )
+        );
+        assert_eq!(
+            fetch_lifecycle_row(&db, "trace-success"),
+            (Some(200), None, 20, 0, None)
+        );
+        assert_eq!(
+            fetch_lifecycle_row(&db, "trace-failed"),
+            (None, Some("GW_UPSTREAM_TIMEOUT".to_string()), 30, 0, None)
+        );
+    }
+
+    #[test]
+    fn reconcile_unresolved_pending_uses_gateway_stop_code_and_never_decreases_duration() {
+        let (_app, db, _dir) = init_test_db();
+        insert_request_log_row(&db, "trace-longer-duration", None, None, 20_000, 10_000);
+
+        let affected =
+            reconcile_unresolved_pending(&db, RequestLogReconcileReason::GatewayStop, 15_000)
+                .expect("reconcile pending rows");
+
+        assert_eq!(affected, 1);
+        assert_eq!(
+            fetch_lifecycle_row(&db, "trace-longer-duration"),
+            (
+                Some(499),
+                Some("GW_REQUEST_INTERRUPTED_BY_GATEWAY_STOP".to_string()),
+                20_000,
+                1,
+                Some(
+                    r#"{"reason":"gateway_stop","reconciled_at_ms":15000,"pending_age_ms":5000}"#
+                        .to_string()
+                )
+            )
+        );
+    }
+
+    #[test]
+    fn reconcile_unresolved_pending_does_not_use_duration_as_terminal_predicate() {
+        let (_app, db, _dir) = init_test_db();
+        insert_request_log_row(&db, "trace-nonzero-duration", None, None, 123, 0);
+
+        let affected =
+            reconcile_unresolved_pending(&db, RequestLogReconcileReason::StartupRecovery, 20_000)
+                .expect("reconcile pending rows");
+
+        assert_eq!(affected, 1);
+        assert_eq!(
+            fetch_lifecycle_row(&db, "trace-nonzero-duration"),
+            (
+                Some(499),
+                Some("GW_REQUEST_INTERRUPTED_BY_RESTART".to_string()),
+                123,
+                1,
+                Some(
+                    r#"{"reason":"startup_recovery","reconciled_at_ms":20000,"pending_age_ms":0}"#
+                        .to_string()
+                )
+            )
+        );
+    }
+
+    #[test]
     fn parses_cx2cc_cost_basis_from_special_settings() {
         let special_settings_json = serde_json::json!([
             {
@@ -874,6 +1584,7 @@ mod tests {
             {
                 "type": "cx2cc_cost_basis",
                 "scope": "request",
+                "bridge_provider_id": 12,
                 "source_cli_key": "codex",
                 "source_provider_id": 42,
                 "priced_model": "gpt-5.4"
@@ -882,8 +1593,210 @@ mod tests {
         .to_string();
 
         assert_eq!(
-            parse_cx2cc_cost_basis(Some(&special_settings_json)),
+            parse_cx2cc_cost_basis(Some(&special_settings_json), Some(12)),
             Some(("codex".to_string(), "gpt-5.4".to_string()))
+        );
+    }
+
+    #[test]
+    fn effective_cost_basis_uses_redirect_from_final_provider_only() {
+        let settings = serde_json::json!([
+            {
+                "type": "model_redirect",
+                "providerId": 7,
+                "targetModel": "failed-provider-model"
+            },
+            {
+                "type": "model_redirect",
+                "providerId": 8,
+                "targetModel": "deepseek-v4-flash"
+            }
+        ])
+        .to_string();
+
+        for cli_key in ["claude", "codex", "gemini", "grok"] {
+            let matched =
+                effective_cost_basis(cli_key, Some("gpt-5.6-luna"), Some(&settings), Some(8))
+                    .expect("matched cost basis");
+            assert_eq!(matched.cli_key, cli_key);
+            assert_eq!(matched.model, "deepseek-v4-flash");
+
+            let unmatched =
+                effective_cost_basis(cli_key, Some("gpt-5.6-luna"), Some(&settings), Some(9))
+                    .expect("requested model fallback");
+            assert_eq!(unmatched.cli_key, cli_key);
+            assert_eq!(unmatched.model, "gpt-5.6-luna");
+        }
+    }
+
+    #[test]
+    fn cx2cc_cost_basis_uses_codex_cache_creation_buckets_when_persisting_cost() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let conn = db.open_connection().expect("open connection");
+        conn.execute(
+            r#"
+INSERT INTO model_prices (cli_key, model, price_json, created_at, updated_at)
+VALUES ('codex', 'gpt-explicit', ?1, 1, 1)
+"#,
+            [r#"{
+              "input_cost_per_token": 0.004,
+              "output_cost_per_token": 0.02,
+              "cache_read_input_token_cost": 0.001,
+              "cache_creation_input_token_cost": 0.006
+            }"#],
+        )
+        .expect("insert explicit model price");
+        conn.execute(
+            r#"
+INSERT INTO model_prices (cli_key, model, price_json, created_at, updated_at)
+VALUES ('codex', 'gpt-fallback', ?1, 1, 1)
+"#,
+            [r#"{
+              "input_cost_per_token": 0.004,
+              "output_cost_per_token": 0.02,
+              "cache_read_input_token_cost": 0.001
+            }"#],
+        )
+        .expect("insert fallback model price");
+        conn.execute(
+            r#"
+INSERT INTO model_prices (cli_key, model, price_json, created_at, updated_at)
+VALUES ('claude', 'claude-client-model', '{"input_cost_per_token":0.001}', 1, 1)
+"#,
+            [],
+        )
+        .expect("insert Claude model price");
+        drop(conn);
+
+        let marker = |priced_model: &str| {
+            serde_json::json!([{
+                "type": "cx2cc_cost_basis",
+                "source_cli_key": "codex",
+                "priced_model": priced_model,
+            }])
+            .to_string()
+        };
+        let items = [
+            RequestLogInsert {
+                special_settings_json: Some(marker("gpt-explicit")),
+                requested_model: Some("claude-client-model".to_string()),
+                input_tokens: Some(1_000),
+                output_tokens: Some(50),
+                total_tokens: Some(1_050),
+                cache_read_input_tokens: Some(100),
+                cache_creation_input_tokens: Some(200),
+                ..request_log_insert("trace-cx2cc-explicit-cost")
+            },
+            RequestLogInsert {
+                special_settings_json: Some(marker("gpt-fallback")),
+                requested_model: Some("claude-client-model".to_string()),
+                input_tokens: Some(1_000),
+                output_tokens: Some(50),
+                total_tokens: Some(1_050),
+                cache_read_input_tokens: Some(100),
+                cache_creation_input_tokens: Some(200),
+                ..request_log_insert("trace-cx2cc-fallback-cost")
+            },
+            RequestLogInsert {
+                special_settings_json: Some(
+                    serde_json::json!([{
+                        "type": "cx2cc_cost_basis",
+                        "bridge_provider_id": 12,
+                        "source_cli_key": "codex",
+                        "priced_model": "gpt-explicit",
+                    }])
+                    .to_string(),
+                ),
+                requested_model: Some("claude-client-model".to_string()),
+                attempts_json: serde_json::json!([
+                    {
+                        "provider_id": 12,
+                        "provider_name": "Failed CX2CC",
+                        "outcome": "failed",
+                        "status": 502
+                    },
+                    {
+                        "provider_id": 13,
+                        "provider_name": "Plain Claude",
+                        "outcome": "success",
+                        "status": 200
+                    }
+                ])
+                .to_string(),
+                input_tokens: Some(100),
+                total_tokens: Some(100),
+                ..request_log_insert("trace-cx2cc-failover-plain-claude-cost")
+            },
+        ];
+
+        insert_batch_once(&app_handle, &db, &items, &mut InsertBatchCache::default())
+            .expect("insert CX2CC request costs");
+
+        let conn = db.open_connection().expect("open connection");
+        let read_cost = |trace_id: &str| {
+            conn.query_row(
+                "SELECT cost_usd_femto FROM request_logs WHERE trace_id = ?1",
+                [trace_id],
+                |row| row.get::<_, Option<i64>>(0),
+            )
+            .expect("read request cost")
+            .expect("request cost should be present")
+        };
+
+        assert_eq!(
+            read_cost("trace-cx2cc-explicit-cost"),
+            5_100_000_000_000_000
+        );
+        assert_eq!(
+            read_cost("trace-cx2cc-fallback-cost"),
+            4_900_000_000_000_000
+        );
+        assert_eq!(
+            read_cost("trace-cx2cc-failover-plain-claude-cost"),
+            100_000_000_000_000,
+            "a failed CX2CC attempt must not price the final plain Claude response"
+        );
+    }
+
+    #[test]
+    fn model_price_lookup_falls_back_across_cli_keys() {
+        let (app, db, _dir) = init_test_db();
+        let app_handle = app.handle().clone();
+        let conn = db.open_connection().expect("open connection");
+        conn.execute(
+            r#"
+INSERT INTO model_prices (cli_key, model, price_json, created_at, updated_at)
+VALUES ('claude', 'kimi-k3', '{"input_cost_per_token":0.001}', 1, 1)
+"#,
+            [],
+        )
+        .expect("insert third-party model price");
+        drop(conn);
+
+        let items = vec![RequestLogInsert {
+            cli_key: "codex".to_string(),
+            requested_model: Some("kimi-k3".to_string()),
+            input_tokens: Some(100),
+            total_tokens: Some(100),
+            ..request_log_insert("trace-cross-cli-price-fallback")
+        }];
+
+        insert_batch_once(&app_handle, &db, &items, &mut InsertBatchCache::default())
+            .expect("insert request log");
+
+        let conn = db.open_connection().expect("open connection");
+        let cost: Option<i64> = conn
+            .query_row(
+                "SELECT cost_usd_femto FROM request_logs WHERE trace_id = 'trace-cross-cli-price-fallback'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read request cost");
+        assert_eq!(
+            cost,
+            Some(100_000_000_000_000),
+            "price stored under another cli_key must still price the request"
         );
     }
 

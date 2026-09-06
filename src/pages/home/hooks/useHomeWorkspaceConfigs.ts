@@ -11,44 +11,53 @@ import type {
 import type { CliKey } from "../../../services/providers/providers";
 
 function buildWorkspaceConfigItems(input: {
-  prompts: Array<{ id: number; name: string }>;
+  prompts: Array<{ id: number; name: string; enabled: boolean }>;
   mcp: Array<{ id: number; name: string; enabled: boolean }>;
   skills: Array<{ id: number; name: string; enabled: boolean }>;
+  showAllItems: boolean;
 }) {
   const items: HomeWorkspaceConfigItem[] = [];
 
-  const prompts = [...input.prompts].sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
-  const enabledMcp = input.mcp
-    .filter((row) => row.enabled)
+  const prompts = input.prompts
+    .filter((row) => input.showAllItems || row.enabled)
     .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
-  const enabledSkills = input.skills
-    .filter((row) => row.enabled)
+  const mcp = input.mcp
+    .filter((row) => input.showAllItems || row.enabled)
+    .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
+  const skills = input.skills
+    .filter((row) => input.showAllItems || row.enabled)
     .sort((a, b) => a.name.localeCompare(b.name, "zh-CN"));
 
   for (const row of prompts) {
     items.push({
       id: `prompt:${row.id}`,
+      resourceId: row.id,
       type: "prompts",
       label: "Prompt",
       name: row.name,
+      enabled: row.enabled,
     });
   }
 
-  for (const row of enabledMcp) {
-    items.push({
-      id: `mcp:${row.id}`,
-      type: "mcp",
-      label: "MCP",
-      name: row.name,
-    });
-  }
-
-  for (const row of enabledSkills) {
+  for (const row of skills) {
     items.push({
       id: `skill:${row.id}`,
+      resourceId: row.id,
       type: "skills",
       label: "Skill",
       name: row.name,
+      enabled: row.enabled,
+    });
+  }
+
+  for (const row of mcp) {
+    items.push({
+      id: `mcp:${row.id}`,
+      resourceId: row.id,
+      type: "mcp",
+      label: "MCP",
+      name: row.name,
+      enabled: row.enabled,
     });
   }
 
@@ -62,8 +71,10 @@ function buildCliWorkspaceConfig(input: {
   promptsQuery: ReturnType<typeof usePromptsListSummaryQuery>;
   mcpQuery: ReturnType<typeof useMcpServersListQuery>;
   skillsQuery: ReturnType<typeof useSkillsInstalledListQuery>;
+  showAllItems: boolean;
 }): HomeCliWorkspaceConfig {
-  const { cliKey, enabled, workspacesQuery, promptsQuery, mcpQuery, skillsQuery } = input;
+  const { cliKey, enabled, workspacesQuery, promptsQuery, mcpQuery, skillsQuery, showAllItems } =
+    input;
   const cliLabel = CLIS.find((cli) => cli.key === cliKey)?.name ?? cliKey;
   const activeWorkspaceId = workspacesQuery.data?.active_id ?? null;
   const activeWorkspace = pickWorkspaceById(workspacesQuery.data?.items ?? [], activeWorkspaceId);
@@ -73,6 +84,11 @@ function buildCliWorkspaceConfig(input: {
     cliLabel,
     workspaceId: activeWorkspaceId,
     workspaceName: activeWorkspace?.name ?? null,
+    workspaces: (workspacesQuery.data?.items ?? []).map((workspace) => ({
+      id: workspace.id,
+      name: workspace.name,
+      isActive: activeWorkspaceId === workspace.id,
+    })),
     loading:
       enabled &&
       (workspacesQuery.isLoading ||
@@ -83,32 +99,39 @@ function buildCliWorkspaceConfig(input: {
       prompts: promptsQuery.data ?? [],
       mcp: mcpQuery.data ?? [],
       skills: skillsQuery.data ?? [],
+      showAllItems,
     }),
   };
 }
 
-export function useHomeWorkspaceConfigs(options?: { enabled?: boolean }) {
+export function useHomeWorkspaceConfigs(options?: { enabled?: boolean; showAllItems?: boolean }) {
   const enabled = options?.enabled ?? true;
+  const showAllItems = options?.showAllItems ?? false;
 
   const claudeWorkspacesQuery = useWorkspacesListQuery("claude", { enabled });
   const codexWorkspacesQuery = useWorkspacesListQuery("codex", { enabled });
   const geminiWorkspacesQuery = useWorkspacesListQuery("gemini", { enabled });
+  const grokWorkspacesQuery = useWorkspacesListQuery("grok", { enabled });
 
   const claudeWorkspaceId = claudeWorkspacesQuery.data?.active_id ?? null;
   const codexWorkspaceId = codexWorkspacesQuery.data?.active_id ?? null;
   const geminiWorkspaceId = geminiWorkspacesQuery.data?.active_id ?? null;
+  const grokWorkspaceId = grokWorkspacesQuery.data?.active_id ?? null;
 
   const claudePromptsQuery = usePromptsListSummaryQuery(claudeWorkspaceId, { enabled });
   const codexPromptsQuery = usePromptsListSummaryQuery(codexWorkspaceId, { enabled });
   const geminiPromptsQuery = usePromptsListSummaryQuery(geminiWorkspaceId, { enabled });
+  const grokPromptsQuery = usePromptsListSummaryQuery(grokWorkspaceId, { enabled });
 
   const claudeMcpQuery = useMcpServersListQuery(claudeWorkspaceId, { enabled });
   const codexMcpQuery = useMcpServersListQuery(codexWorkspaceId, { enabled });
   const geminiMcpQuery = useMcpServersListQuery(geminiWorkspaceId, { enabled });
+  const grokMcpQuery = useMcpServersListQuery(grokWorkspaceId, { enabled });
 
   const claudeSkillsQuery = useSkillsInstalledListQuery(claudeWorkspaceId, { enabled });
   const codexSkillsQuery = useSkillsInstalledListQuery(codexWorkspaceId, { enabled });
   const geminiSkillsQuery = useSkillsInstalledListQuery(geminiWorkspaceId, { enabled });
+  const grokSkillsQuery = useSkillsInstalledListQuery(grokWorkspaceId, { enabled });
 
   return useMemo(
     () => [
@@ -119,6 +142,7 @@ export function useHomeWorkspaceConfigs(options?: { enabled?: boolean }) {
         promptsQuery: claudePromptsQuery,
         mcpQuery: claudeMcpQuery,
         skillsQuery: claudeSkillsQuery,
+        showAllItems,
       }),
       buildCliWorkspaceConfig({
         cliKey: "codex",
@@ -127,6 +151,7 @@ export function useHomeWorkspaceConfigs(options?: { enabled?: boolean }) {
         promptsQuery: codexPromptsQuery,
         mcpQuery: codexMcpQuery,
         skillsQuery: codexSkillsQuery,
+        showAllItems,
       }),
       buildCliWorkspaceConfig({
         cliKey: "gemini",
@@ -135,6 +160,16 @@ export function useHomeWorkspaceConfigs(options?: { enabled?: boolean }) {
         promptsQuery: geminiPromptsQuery,
         mcpQuery: geminiMcpQuery,
         skillsQuery: geminiSkillsQuery,
+        showAllItems,
+      }),
+      buildCliWorkspaceConfig({
+        cliKey: "grok",
+        enabled,
+        workspacesQuery: grokWorkspacesQuery,
+        promptsQuery: grokPromptsQuery,
+        mcpQuery: grokMcpQuery,
+        skillsQuery: grokSkillsQuery,
+        showAllItems,
       }),
     ],
     [
@@ -151,6 +186,11 @@ export function useHomeWorkspaceConfigs(options?: { enabled?: boolean }) {
       geminiPromptsQuery,
       geminiSkillsQuery,
       geminiWorkspacesQuery,
+      grokMcpQuery,
+      grokPromptsQuery,
+      grokSkillsQuery,
+      grokWorkspacesQuery,
+      showAllItems,
     ]
   );
 }

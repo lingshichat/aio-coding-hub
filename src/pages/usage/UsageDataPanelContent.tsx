@@ -4,7 +4,7 @@ import { Button } from "../../ui/Button";
 import { TabList } from "../../ui/TabList";
 import { formatInteger } from "../../utils/formatters";
 import { PROVIDER_FILTER_ALL, SCOPE_ITEMS, USAGE_TABLE_TAB_ITEMS } from "./constants";
-import { CacheTrendBody, UsageTableBody } from "./UsageDataPanelBodies";
+import { CacheTrendBody, MetricsTrendBody, UsageTableBody } from "./UsageDataPanelBodies";
 import { UsageAvailabilityPanel } from "../../components/usage/UsageAvailabilityPanel";
 
 function UsageScopeGroup({
@@ -13,7 +13,8 @@ function UsageScopeGroup({
   loading,
 }: Pick<UsageDataPanelProps, "scope" | "onChangeScope" | "loading">) {
   return (
-    <div className="flex items-center gap-1.5" role="group" aria-label="维度筛选">
+    <fieldset className="flex items-center gap-1.5 border-0 p-0">
+      <legend className="sr-only">维度筛选</legend>
       {SCOPE_ITEMS.map((item) => (
         <Button
           key={item.key}
@@ -27,19 +28,29 @@ function UsageScopeGroup({
           {item.label}
         </Button>
       ))}
-    </div>
+    </fieldset>
   );
 }
 
 function UsagePanelTitle({
   tableTab,
   cacheTrendProviderCount,
-}: Pick<UsageDataPanelProps, "tableTab" | "cacheTrendProviderCount">) {
+  metricsTrendProviderCount,
+}: Pick<
+  UsageDataPanelProps,
+  "tableTab" | "cacheTrendProviderCount" | "metricsTrendProviderCount"
+>) {
   if (tableTab === "cacheTrend") {
     if (cacheTrendProviderCount > 0) {
       return `${formatInteger(cacheTrendProviderCount)} 供应商 · 命中率走势`;
     }
     return "命中率走势";
+  }
+  if (tableTab === "metricsTrend") {
+    if (metricsTrendProviderCount > 0) {
+      return `${formatInteger(metricsTrendProviderCount)} 供应商 · 指标走势`;
+    }
+    return "指标走势";
   }
   return null;
 }
@@ -54,9 +65,7 @@ function UsageProviderFilterSelect({
 }) {
   return (
     <label className="flex items-center gap-2">
-      <span className="text-xs font-medium text-slate-500 dark:text-slate-400 whitespace-nowrap">
-        供应商
-      </span>
+      <span className="text-xs font-medium text-muted-foreground whitespace-nowrap">供应商</span>
       <select
         value={providerSelectValue}
         aria-label="供应商筛选"
@@ -65,7 +74,7 @@ function UsageProviderFilterSelect({
           onProviderIdChange(next === PROVIDER_FILTER_ALL ? null : Number(next));
         }}
         disabled={loading}
-        className="h-8 min-w-44 rounded-md border border-slate-200 dark:border-slate-700 bg-white dark:bg-slate-800 px-2 text-xs text-slate-900 dark:text-slate-100 outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:cursor-not-allowed disabled:bg-slate-50 dark:disabled:bg-slate-900"
+        className="h-8 min-w-44 rounded-md border border-border bg-white dark:bg-secondary px-2 text-xs text-foreground outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/20 disabled:cursor-not-allowed disabled:bg-secondary dark:disabled:bg-card"
       >
         <option value={PROVIDER_FILTER_ALL}>全部</option>
         {providerOptions.map((option) => (
@@ -85,6 +94,7 @@ function UsageDataPanelHeader({
   onChangeScope,
   loading,
   cacheTrendProviderCount,
+  metricsTrendProviderCount,
   providerSelectValue,
   providerOptions,
   onProviderIdChange,
@@ -97,6 +107,7 @@ function UsageDataPanelHeader({
   | "onChangeScope"
   | "loading"
   | "cacheTrendProviderCount"
+  | "metricsTrendProviderCount"
   | "providerSelectValue"
   | "providerOptions"
   | "onProviderIdChange"
@@ -105,6 +116,7 @@ function UsageDataPanelHeader({
   const titleText = UsagePanelTitle({
     tableTab,
     cacheTrendProviderCount,
+    metricsTrendProviderCount,
   });
 
   return (
@@ -123,9 +135,7 @@ function UsageDataPanelHeader({
         )}
       </div>
       <div className="flex items-center gap-3">
-        {titleText ? (
-          <div className="text-xs text-slate-500 dark:text-slate-400">{titleText}</div>
-        ) : null}
+        {titleText ? <div className="text-xs text-muted-foreground">{titleText}</div> : null}
         <UsageProviderFilterSelect
           providerSelectValue={providerSelectValue}
           providerOptions={providerOptions}
@@ -140,7 +150,7 @@ function UsageDataPanelHeader({
 function UsageStaleBar({ active }: { active: boolean }) {
   if (!active) return null;
   return (
-    <div className="h-0.5 w-full overflow-hidden bg-slate-100 dark:bg-slate-700">
+    <div className="h-0.5 w-full overflow-hidden bg-secondary">
       <div className="h-full w-1/3 animate-[loading_1.5s_ease-in-out_infinite] bg-accent" />
     </div>
   );
@@ -187,6 +197,39 @@ function CacheTrendPanelBody({
         <CacheTrendBody
           cacheTrendLoading={cacheTrendLoading}
           cacheTrendRows={cacheTrendRows}
+          errorText={errorText}
+          customPending={customPending}
+          period={period}
+          customApplied={customApplied}
+        />
+      </div>
+    </UsageDataPanelScrollArea>
+  );
+}
+
+function MetricsTrendPanelBody({
+  activeStale,
+  metricsTrendLoading,
+  metricsTrendRows,
+  errorText,
+  customPending,
+  period,
+  customApplied,
+}: Pick<
+  UsageDataPanelProps,
+  | "metricsTrendLoading"
+  | "metricsTrendRows"
+  | "errorText"
+  | "customPending"
+  | "period"
+  | "customApplied"
+> & { activeStale: boolean }) {
+  return (
+    <UsageDataPanelScrollArea activeStale={activeStale}>
+      <div className="px-6 pb-6">
+        <MetricsTrendBody
+          metricsTrendLoading={metricsTrendLoading}
+          metricsTrendRows={metricsTrendRows}
           errorText={errorText}
           customPending={customPending}
           period={period}
@@ -250,6 +293,8 @@ function UsageDataPanelBody({
   activeStale,
   cacheTrendLoading,
   cacheTrendRows,
+  metricsTrendLoading,
+  metricsTrendRows,
   errorText,
   customPending,
   period,
@@ -267,6 +312,8 @@ function UsageDataPanelBody({
   | "tableTab"
   | "cacheTrendLoading"
   | "cacheTrendRows"
+  | "metricsTrendLoading"
+  | "metricsTrendRows"
   | "errorText"
   | "customPending"
   | "period"
@@ -298,6 +345,20 @@ function UsageDataPanelBody({
         activeStale={activeStale}
         cacheTrendLoading={cacheTrendLoading}
         cacheTrendRows={cacheTrendRows}
+        errorText={errorText}
+        customPending={customPending}
+        period={period}
+        customApplied={customApplied}
+      />
+    );
+  }
+
+  if (tableTab === "metricsTrend") {
+    return (
+      <MetricsTrendPanelBody
+        activeStale={activeStale}
+        metricsTrendLoading={metricsTrendLoading}
+        metricsTrendRows={metricsTrendRows}
         errorText={errorText}
         customPending={customPending}
         period={period}
@@ -342,6 +403,7 @@ export function UsageDataPanelContent({
         onChangeScope={props.onChangeScope}
         loading={props.loading}
         cacheTrendProviderCount={props.cacheTrendProviderCount}
+        metricsTrendProviderCount={props.metricsTrendProviderCount}
         providerSelectValue={props.providerSelectValue}
         providerOptions={props.providerOptions}
         onProviderIdChange={props.onProviderIdChange}
@@ -353,6 +415,8 @@ export function UsageDataPanelContent({
         activeStale={activeStale}
         cacheTrendLoading={props.cacheTrendLoading}
         cacheTrendRows={props.cacheTrendRows}
+        metricsTrendLoading={props.metricsTrendLoading}
+        metricsTrendRows={props.metricsTrendRows}
         errorText={props.errorText}
         customPending={props.customPending}
         period={props.period}

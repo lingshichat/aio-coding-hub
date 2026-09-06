@@ -12,8 +12,9 @@ import {
 import { invokeGeneratedIpc, type GeneratedCommandResult } from "../generatedIpc";
 import { createRiskyIpcConfirm } from "../ipcConfirm";
 import type { CliKey } from "../providers/providers";
+import { CLI_KEYS } from "../../constants/clis";
 
-const CLI_KEY_VALUES = ["claude", "codex", "gemini"] as const satisfies readonly CliKey[];
+const CLI_KEY_VALUES = CLI_KEYS;
 
 export type SkillRepoSummary = GeneratedSkillRepoSummary;
 export type InstalledSkillSummary = GeneratedInstalledSkillSummary;
@@ -29,6 +30,11 @@ export type SkillRepoUpsertInput = {
   gitUrl: string;
   branch: string;
   enabled: boolean;
+};
+
+export type SkillRepoDiscoverAvailableInput = {
+  repoId: number;
+  refresh: boolean;
 };
 
 export type SkillInstallInput = {
@@ -237,6 +243,20 @@ export async function skillsDiscoverAvailable(refresh: boolean) {
     args: { refresh },
     invoke: () =>
       commands.skillsDiscoverAvailable(refresh) as Promise<
+        GeneratedCommandResult<AvailableSkillSummary[]>
+      >,
+  });
+}
+
+export async function skillRepoDiscoverAvailable(input: SkillRepoDiscoverAvailableInput) {
+  const repoId = validateSkillRepoId(input.repoId);
+
+  return invokeGeneratedIpc<AvailableSkillSummary[]>({
+    title: "发现仓库技能失败",
+    cmd: "skill_repo_discover_available",
+    args: { repoId, refresh: input.refresh },
+    invoke: () =>
+      commands.skillRepoDiscoverAvailable(repoId, input.refresh) as Promise<
         GeneratedCommandResult<AvailableSkillSummary[]>
       >,
   });

@@ -1,11 +1,17 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
-import type { ProviderSummary } from "../../services/providers/providers";
+import type {
+  ProviderOAuthStatusResult,
+  ProviderSummary,
+} from "../../services/providers/providers";
 import {
   providerOAuthFetchLimits,
+  providerOAuthResetCodexQuota,
   providerOAuthStatus,
   providerClaudeTerminalLaunchCommand,
   providerDelete,
+  providerDuplicate,
   providerTestAvailability,
   providerUpsert,
   providerSetEnabled,
@@ -15,11 +21,14 @@ import {
 import { gatewayCircuitResetProvider } from "../../services/gateway/gateway";
 import {
   fetchProviderOAuthStatus,
+  writeProviderOAuthStatusCache,
   readProviderOAuthLimitsCache,
   refreshProviderOAuthLimits,
+  resetProviderOAuthCodexQuota,
   useOAuthLimitsQuery,
   useProviderClaudeTerminalLaunchCommandMutation,
   useProviderDeleteMutation,
+  useProviderDuplicateMutation,
   useProviderOAuthStatusQuery,
   useProviderSetEnabledMutation,
   useProviderTestAvailabilityMutation,
@@ -40,9 +49,11 @@ vi.mock("../../services/providers/providers", async () => {
     providersList: vi.fn(),
     providerOAuthStatus: vi.fn(),
     providerOAuthFetchLimits: vi.fn(),
+    providerOAuthResetCodexQuota: vi.fn(),
     providerUpsert: vi.fn(),
     providerSetEnabled: vi.fn(),
     providerDelete: vi.fn(),
+    providerDuplicate: vi.fn(),
     providerTestAvailability: vi.fn(),
     providersReorder: vi.fn(),
     providerClaudeTerminalLaunchCommand: vi.fn(),
@@ -90,7 +101,15 @@ function makeProvider(
     oauth_last_error: partial.oauth_last_error ?? null,
     source_provider_id: partial.source_provider_id ?? null,
     bridge_type: partial.bridge_type ?? null,
+    model_policy_status: partial.model_policy_status ?? "ready",
+    model_policy: partial.model_policy ?? {
+      version: 1,
+      mode: "all",
+      modelPatterns: [],
+      mappings: [],
+    },
     stream_idle_timeout_seconds: partial.stream_idle_timeout_seconds ?? null,
+    extension_values: partial.extension_values ?? [],
     api_key_configured: partial.api_key_configured ?? false,
   };
 }
@@ -232,6 +251,86 @@ describe("query/providers", () => {
     expect(client.getQueryState(providersKeys.oauthStatus(Number.NaN))).toBeUndefined();
   });
 
+  it("fetchProviderOAuthStatus refetches from network even when cache is fresh by staleTime", async () => {
+    setTauriRuntime();
+
+    // 还原生产配置：全局 staleTime 5 分钟（见 src/query/queryClient.ts）。
+    // 旧实现的 fetchQuery 会直接返回刷新前的缓存，导致「到期」时间不更新。
+    const client = new QueryClient({
+      defaultOptions: { queries: { retry: false, staleTime: 5 * 60 * 1000 } },
+    });
+    const stale: ProviderOAuthStatusResult = {
+      connected: true,
+      provider_type: "grok_oauth",
+      email: "user@example.com",
+      expires_at: 1_700_000_000,
+      has_refresh_token: true,
+    };
+    const fresh: ProviderOAuthStatusResult = { ...stale, expires_at: 1_800_000_000 };
+    client.setQueryData(providersKeys.oauthStatus(9), stale);
+    vi.mocked(providerOAuthStatus).mockResolvedValue(fresh);
+
+    await expect(fetchProviderOAuthStatus(client, 9)).resolves.toEqual(fresh);
+    expect(providerOAuthStatus).toHaveBeenCalledWith(9);
+    expect(client.getQueryData(providersKeys.oauthStatus(9))).toEqual(fresh);
+  });
+
+  it("fetchProviderOAuthStatus cancels an in-flight request so a stale late response cannot overwrite", async () => {
+    setTauriRuntime();
+
+    const client = createTestQueryClient();
+    const queryKey = providersKeys.oauthStatus(9);
+    const stale: ProviderOAuthStatusResult = {
+      connected: true,
+      provider_type: "grok_oauth",
+      email: "user@example.com",
+      expires_at: 1_700_000_000,
+      has_refresh_token: true,
+    };
+    const fresh: ProviderOAuthStatusResult = { ...stale, expires_at: 1_800_000_000 };
+
+    let resolveStale!: (value: ProviderOAuthStatusResult) => void;
+    vi.mocked(providerOAuthStatus)
+      .mockImplementationOnce(() => new Promise((resolve) => (resolveStale = resolve)))
+      .mockResolvedValueOnce(fresh);
+
+    // 模拟一个刷新前就已发出、迟迟未返回的 status 请求（例如后台 refetch）。
+    const inflight = client
+      .fetchQuery({ queryKey, queryFn: () => providerOAuthStatus(9) })
+      .catch(() => null); // 被取消时以 CancelledError 拒绝
+
+    await expect(fetchProviderOAuthStatus(client, 9)).resolves.toEqual(fresh);
+
+    // 旧请求这时才带着刷新前的数据返回——不应覆盖新数据。
+    resolveStale(stale);
+    await inflight;
+    expect(client.getQueryData(queryKey)).toEqual(fresh);
+  });
+
+  it("writeProviderOAuthStatusCache writes status, clears with null, and skips null providerId", () => {
+    const client = createTestQueryClient();
+    const status: ProviderOAuthStatusResult = {
+      connected: true,
+      provider_type: "grok_oauth",
+      email: "user@example.com",
+      expires_at: 1_800_000_000,
+      has_refresh_token: true,
+    };
+
+    writeProviderOAuthStatusCache(client, 9, status);
+    expect(client.getQueryData(providersKeys.oauthStatus(9))).toEqual(status);
+
+    writeProviderOAuthStatusCache(client, 9, null);
+    expect(client.getQueryData(providersKeys.oauthStatus(9))).toBeNull();
+
+    writeProviderOAuthStatusCache(client, null, status);
+    expect(client.getQueryCache().getAll()).toHaveLength(1);
+
+    expect(() => writeProviderOAuthStatusCache(client, Number.NaN, status)).toThrow(
+      "SEC_INVALID_INPUT"
+    );
+  });
+
   it("normalizes OAuth limits providerId before cache reads, refreshes, and query calls", async () => {
     setTauriRuntime();
 
@@ -241,6 +340,7 @@ describe("query/providers", () => {
       limit_weekly_text: null,
       limit_5h_reset_at: 1700000000,
       limit_weekly_reset_at: null,
+      reset_credit_available_count: null,
     };
     vi.mocked(providerOAuthFetchLimits).mockResolvedValue(limits);
 
@@ -277,6 +377,7 @@ describe("query/providers", () => {
       limit_weekly_text: null,
       limit_5h_reset_at: null,
       limit_weekly_reset_at: null,
+      reset_credit_available_count: 1,
     };
     vi.mocked(providerOAuthFetchLimits).mockResolvedValueOnce(availableLimits);
     vi.mocked(gatewayCircuitResetProvider).mockResolvedValue(true);
@@ -296,6 +397,7 @@ describe("query/providers", () => {
       limit_weekly_text: null,
       limit_5h_reset_at: 1_700_100_000,
       limit_weekly_reset_at: null,
+      reset_credit_available_count: 0,
     });
 
     await expect(
@@ -314,6 +416,7 @@ describe("query/providers", () => {
       limit_weekly_text: null,
       limit_5h_reset_at: null,
       limit_weekly_reset_at: null,
+      reset_credit_available_count: 2,
     };
     vi.mocked(providerOAuthFetchLimits).mockResolvedValueOnce(limits);
     vi.mocked(gatewayCircuitResetProvider).mockRejectedValueOnce(new Error("reset boom"));
@@ -326,6 +429,89 @@ describe("query/providers", () => {
 
     expect(gatewayCircuitResetProvider).toHaveBeenCalledWith(11);
     expect(client.getQueryData(oauthLimitsKeys.detail(11))).toEqual(limits);
+  });
+
+  it("resetProviderOAuthCodexQuota writes refreshed limits only for the target provider", async () => {
+    setTauriRuntime();
+
+    const oldTargetLimits = {
+      limit_short_label: "5h",
+      limit_5h_text: "0%",
+      limit_weekly_text: "10%",
+      limit_5h_reset_at: null,
+      limit_weekly_reset_at: null,
+      reset_credit_available_count: 1,
+    };
+    const otherLimits = {
+      limit_short_label: "5h",
+      limit_5h_text: "80%",
+      limit_weekly_text: "90%",
+      limit_5h_reset_at: null,
+      limit_weekly_reset_at: null,
+      reset_credit_available_count: 5,
+    };
+    const refreshedLimits = {
+      limit_short_label: "5h",
+      limit_5h_text: "100%",
+      limit_weekly_text: "100%",
+      limit_5h_reset_at: 1_700_000_000,
+      limit_weekly_reset_at: 1_700_100_000,
+      reset_credit_available_count: 0,
+    };
+    vi.mocked(providerOAuthResetCodexQuota).mockResolvedValueOnce({
+      success: true,
+      code: "ok",
+      windows_reset: 2,
+      refreshed_limits: refreshedLimits,
+      refresh_error: null,
+    });
+    vi.mocked(gatewayCircuitResetProvider).mockResolvedValue(true);
+
+    const client = createTestQueryClient();
+    client.setQueryData(oauthLimitsKeys.detail(11), oldTargetLimits);
+    client.setQueryData(oauthLimitsKeys.detail(22), otherLimits);
+
+    await expect(
+      resetProviderOAuthCodexQuota(client, 11, { resetCircuitAfterRefresh: true })
+    ).resolves.toMatchObject({ success: true, refreshed_limits: refreshedLimits });
+
+    expect(providerOAuthResetCodexQuota).toHaveBeenCalledWith(11);
+    expect(gatewayCircuitResetProvider).toHaveBeenCalledWith(11);
+    expect(client.getQueryData(oauthLimitsKeys.detail(11))).toEqual(refreshedLimits);
+    expect(client.getQueryData(oauthLimitsKeys.detail(22))).toEqual(otherLimits);
+  });
+
+  it("resetProviderOAuthCodexQuota preserves cached limits on partial success", async () => {
+    setTauriRuntime();
+    vi.mocked(gatewayCircuitResetProvider).mockClear();
+
+    const oldLimits = {
+      limit_short_label: "5h",
+      limit_5h_text: "0%",
+      limit_weekly_text: "10%",
+      limit_5h_reset_at: null,
+      limit_weekly_reset_at: null,
+      reset_credit_available_count: 1,
+    };
+    vi.mocked(providerOAuthResetCodexQuota).mockResolvedValueOnce({
+      success: true,
+      code: "ok",
+      windows_reset: 2,
+      refreshed_limits: null,
+      refresh_error: "usage refresh failed",
+    });
+
+    const client = createTestQueryClient();
+    client.setQueryData(oauthLimitsKeys.detail(11), oldLimits);
+
+    await expect(resetProviderOAuthCodexQuota(client, 11)).resolves.toMatchObject({
+      success: true,
+      refreshed_limits: null,
+      refresh_error: "usage refresh failed",
+    });
+
+    expect(client.getQueryData(oauthLimitsKeys.detail(11))).toEqual(oldLimits);
+    expect(gatewayCircuitResetProvider).not.toHaveBeenCalled();
   });
 
   it("useProviderSetEnabledMutation updates cached providers list", async () => {
@@ -468,9 +654,29 @@ describe("query/providers", () => {
       await result.current.mutateAsync({ cliKey: " claude " as never, providerId: 1 });
     });
 
-    expect(providerDelete).toHaveBeenCalledWith(1);
+    expect(providerDelete).toHaveBeenCalledWith(1, { clearUsageStats: false });
     expect(client.getQueryData(providersKeys.list("claude"))).toEqual([providers[1]]);
     expect(client.getQueryData(providersKeys.list(" claude " as never))).toBeUndefined();
+  });
+
+  it("useProviderDeleteMutation forwards usage stats cleanup choice", async () => {
+    setTauriRuntime();
+
+    vi.mocked(providerDelete).mockResolvedValue(true);
+
+    const client = createTestQueryClient();
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useProviderDeleteMutation(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({
+        cliKey: "claude",
+        providerId: 1,
+        clearUsageStats: true,
+      });
+    });
+
+    expect(providerDelete).toHaveBeenCalledWith(1, { clearUsageStats: true });
   });
 
   it("useProviderDeleteMutation is a no-op when service returns false", async () => {
@@ -553,6 +759,87 @@ describe("query/providers", () => {
     expect(client.getQueryData(providersKeys.list("claude"))).toEqual(providers);
   });
 
+  it("useProviderDuplicateMutation inserts duplicate after source and persists order", async () => {
+    setTauriRuntime();
+
+    const providers: ProviderSummary[] = [
+      makeProvider({ id: 1, cli_key: "claude", name: "P1" }),
+      makeProvider({ id: 2, cli_key: "claude", name: "P2" }),
+    ];
+    const duplicated = makeProvider({ id: 3, cli_key: "claude", name: "P1 副本" });
+    const reordered = [providers[0], duplicated, providers[1]];
+
+    vi.mocked(providerDuplicate).mockClear();
+    vi.mocked(providersReorder).mockClear();
+    vi.mocked(providerDuplicate).mockResolvedValue(duplicated);
+    vi.mocked(providersReorder).mockResolvedValue(reordered);
+
+    const client = createTestQueryClient();
+    client.setQueryData(providersKeys.list("claude"), providers);
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useProviderDuplicateMutation(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ providerId: 1 });
+    });
+
+    expect(providerDuplicate).toHaveBeenCalledWith(1);
+    expect(providersReorder).toHaveBeenCalledWith("claude", [1, 3, 2]);
+    expect(client.getQueryData(providersKeys.list("claude"))).toEqual(reordered);
+  });
+
+  it("useProviderDuplicateMutation repositions duplicate already present in cache", async () => {
+    setTauriRuntime();
+
+    const source = makeProvider({ id: 1, cli_key: "claude", name: "P1" });
+    const other = makeProvider({ id: 2, cli_key: "claude", name: "P2" });
+    const duplicated = makeProvider({ id: 3, cli_key: "claude", name: "P1 副本" });
+    const reordered = [source, duplicated, other];
+
+    vi.mocked(providerDuplicate).mockClear();
+    vi.mocked(providersReorder).mockClear();
+    vi.mocked(providerDuplicate).mockResolvedValue(duplicated);
+    vi.mocked(providersReorder).mockResolvedValue(reordered);
+
+    const client = createTestQueryClient();
+    client.setQueryData(providersKeys.list("claude"), [source, other, duplicated]);
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useProviderDuplicateMutation(), { wrapper });
+    await act(async () => {
+      await result.current.mutateAsync({ providerId: 1 });
+    });
+
+    expect(providersReorder).toHaveBeenCalledWith("claude", [1, 3, 2]);
+    expect(client.getQueryData(providersKeys.list("claude"))).toEqual(reordered);
+  });
+
+  it("useProviderDuplicateMutation propagates reorder failures after invalidating list", async () => {
+    setTauriRuntime();
+
+    const providers: ProviderSummary[] = [
+      makeProvider({ id: 1, cli_key: "claude", name: "P1" }),
+      makeProvider({ id: 2, cli_key: "claude", name: "P2" }),
+    ];
+    const duplicated = makeProvider({ id: 3, cli_key: "claude", name: "P1 副本" });
+
+    vi.mocked(providerDuplicate).mockClear();
+    vi.mocked(providersReorder).mockClear();
+    vi.mocked(providerDuplicate).mockResolvedValue(duplicated);
+    vi.mocked(providersReorder).mockRejectedValue(new Error("reorder failed"));
+
+    const client = createTestQueryClient();
+    const invalidateSpy = vi.spyOn(client, "invalidateQueries");
+    client.setQueryData(providersKeys.list("claude"), providers);
+    const wrapper = createQueryWrapper(client);
+
+    const { result } = renderHook(() => useProviderDuplicateMutation(), { wrapper });
+    await expect(result.current.mutateAsync({ providerId: 1 })).rejects.toThrow("reorder failed");
+
+    expect(providersReorder).toHaveBeenCalledWith("claude", [1, 3, 2]);
+    expect(invalidateSpy).toHaveBeenCalledWith({ queryKey: providersKeys.list("claude") });
+  });
+
   it("useProviderClaudeTerminalLaunchCommandMutation calls service with provider id", async () => {
     setTauriRuntime();
 
@@ -593,6 +880,18 @@ describe("query/providers", () => {
       await result.current.mutateAsync({ providerId: 8 });
     });
 
-    expect(providerTestAvailability).toHaveBeenCalledWith(8);
+    expect(providerTestAvailability).toHaveBeenCalledWith(8, {
+      model: undefined,
+      prompt: undefined,
+    });
+
+    await act(async () => {
+      await result.current.mutateAsync({ providerId: 8, model: "grok-4.6", prompt: "你好" });
+    });
+
+    expect(providerTestAvailability).toHaveBeenLastCalledWith(8, {
+      model: "grok-4.6",
+      prompt: "你好",
+    });
   });
 });

@@ -13,11 +13,16 @@ import type {
   CliSessionsFolderLookupInput,
   CliSessionsSource,
 } from "../../services/cli/cliSessions";
+import { type PersistedRequestLogActivityState } from "../../services/gateway/requestLogState";
 import {
-  isPersistedRequestLogInProgress,
-  requestLogCreatedAtMs,
-} from "../../services/gateway/requestLogState";
+  buildRequestActivityProjection,
+  shouldTickRequestActivityClock,
+  type ActiveRequestSnapshotItem,
+  type ProjectedRealtimeCard,
+  type ProjectedRequestLogRow,
+} from "../../services/gateway/requestActivityProjection";
 import type { RequestLogSummary } from "../../services/gateway/requestLogs";
+import { hasCodexSystemRequestSpecialSetting } from "../../services/gateway/requestLogSpecialSettings";
 import type { TraceSession } from "../../services/gateway/traceStore";
 import { Button } from "../../ui/Button";
 import { Card } from "../../ui/Card";
@@ -39,29 +44,23 @@ import {
 import {
   buildRequestLogAuditMeta,
   buildRequestRouteMeta,
-  computeEffectiveInputTokens,
   computeStatusBadge,
+  resolveCacheCreationDisplay,
+} from "./requestLogPresentation";
+import {
   FastModeBadge,
-  formatClaudeModelMappingText,
   FolderBadge,
   FreeBadge,
-  getErrorCodeLabel,
-  hasClaudeModelMappingSpecialSetting,
-  hasPriorityServiceTierSpecialSetting,
-  resolveClaudeModelMappingFromSpecialSettings,
-  resolveLiveTraceDurationMs,
-  resolveLiveTraceProvider,
+  ReasoningEffortBadge,
   SessionReuseBadge,
-} from "./HomeLogShared";
+} from "./LogBadges";
 import {
-  Clock,
-  CheckCircle2,
-  XCircle,
-  Server,
-  RefreshCw,
-  ArrowUpRight,
-  Loader2,
-} from "lucide-react";
+  formatModelRedirectText,
+  hasPriorityServiceTierSpecialSetting,
+  resolveModelRedirectFromSpecialSettings,
+} from "./requestLogSpecialSettings";
+import { getErrorCodeLabel } from "./requestLogErrorLabels";
+import { Clock, CheckCircle2, XCircle, Server, RefreshCw, ArrowUpRight } from "lucide-react";
 import { RealtimeTraceCards } from "./RealtimeTraceCards";
 import { CliBrandIcon } from "./CliBrandIcon";
 import {
@@ -90,92 +89,10 @@ function sessionFolderLookupKey(cliKey: string, sessionId: string | null | undef
   return `${cliKey}:${normalized}`;
 }
 
-function makeSortRequestLogsForDisplay(liveTraceIds: ReadonlySet<string>) {
-  return (a: RequestLogSummary, b: RequestLogSummary) => {
-    // Only treat a log as in-progress when the trace store still tracks it.
-    const aInProgress = isPersistedRequestLogInProgress(a) && liveTraceIds.has(a.trace_id);
-    const bInProgress = isPersistedRequestLogInProgress(b) && liveTraceIds.has(b.trace_id);
-    if (aInProgress !== bInProgress) return aInProgress ? -1 : 1;
-
-    const aTsMs = requestLogCreatedAtMs(a);
-    const bTsMs = requestLogCreatedAtMs(b);
-    if (aTsMs !== bTsMs) return bTsMs - aTsMs;
-    return b.id - a.id;
-  };
-}
-
-function mergeTraceWithRequestLog(
-  trace: TraceSession,
-  requestLog: RequestLogSummary | undefined
-): TraceSession {
-  if (!requestLog) return trace;
-
-  const summary = trace.summary;
-  // Intentionally checks only DB status here — the trace already exists, so
-  // we just need to know whether the request log is still pending to decide
-  // which fields to backfill from the persisted record.
-  const requestLogInProgress = isPersistedRequestLogInProgress(requestLog);
-  if (!summary && requestLogInProgress) {
-    const claudeModelMapping = resolveClaudeModelMappingFromSpecialSettings(
-      requestLog.special_settings_json,
-      requestLog.final_provider_id
-    );
-    return {
-      ...trace,
-      session_id: trace.session_id ?? requestLog.session_id ?? null,
-      requested_model: trace.requested_model ?? requestLog.requested_model ?? null,
-      claude_model_mapping: trace.claude_model_mapping ?? claudeModelMapping,
-      last_seen_ms: Math.max(trace.last_seen_ms, requestLogCreatedAtMs(requestLog)),
-    };
-  }
-
-  const mergedSummary = {
-    trace_id: trace.trace_id,
-    cli_key: trace.cli_key,
-    method: trace.method,
-    path: trace.path,
-    query: trace.query,
-    status: summary?.status ?? requestLog.status ?? null,
-    error_category: summary?.error_category ?? null,
-    error_code: summary?.error_code ?? requestLog.error_code ?? null,
-    duration_ms: summary?.duration_ms ?? requestLog.duration_ms ?? 0,
-    ttfb_ms: summary?.ttfb_ms ?? requestLog.ttfb_ms ?? null,
-    attempts: summary?.attempts ?? [],
-    input_tokens: summary?.input_tokens ?? requestLog.input_tokens ?? null,
-    output_tokens: summary?.output_tokens ?? requestLog.output_tokens ?? null,
-    total_tokens: summary?.total_tokens ?? requestLog.total_tokens ?? null,
-    cache_read_input_tokens:
-      summary?.cache_read_input_tokens ?? requestLog.cache_read_input_tokens ?? null,
-    cache_creation_input_tokens:
-      summary?.cache_creation_input_tokens ?? requestLog.cache_creation_input_tokens ?? null,
-    cache_creation_5m_input_tokens:
-      summary?.cache_creation_5m_input_tokens ?? requestLog.cache_creation_5m_input_tokens ?? null,
-    cache_creation_1h_input_tokens:
-      summary?.cache_creation_1h_input_tokens ?? requestLog.cache_creation_1h_input_tokens ?? null,
-    cost_usd: summary?.cost_usd ?? requestLog.cost_usd ?? null,
-    cost_multiplier: summary?.cost_multiplier ?? requestLog.cost_multiplier ?? null,
-  };
-
-  return {
-    ...trace,
-    session_id: trace.session_id ?? requestLog.session_id ?? null,
-    requested_model: trace.requested_model ?? requestLog.requested_model ?? null,
-    claude_model_mapping: hasClaudeModelMappingSpecialSetting(requestLog.special_settings_json)
-      ? resolveClaudeModelMappingFromSpecialSettings(
-          requestLog.special_settings_json,
-          requestLog.final_provider_id
-        )
-      : (trace.claude_model_mapping ?? null),
-    summary: mergedSummary,
-    last_seen_ms: Math.max(trace.last_seen_ms, requestLogCreatedAtMs(requestLog)),
-  };
-}
-
 type RequestLogCardProps = {
   compactMode: boolean;
   log: RequestLogSummary;
-  liveTrace?: TraceSession;
-  nowMs: number;
+  activityState: PersistedRequestLogActivityState;
   isSelected: boolean;
   sessionFolder?: CliSessionsFolderLookupEntry | null;
   showCustomTooltip: boolean;
@@ -186,8 +103,7 @@ type RequestLogCardProps = {
 const RequestLogCard = memo(function RequestLogCard({
   compactMode,
   log,
-  liveTrace,
-  nowMs,
+  activityState,
   isSelected,
   sessionFolder,
   showCustomTooltip,
@@ -195,23 +111,24 @@ const RequestLogCard = memo(function RequestLogCard({
   formatUnixSeconds,
 }: RequestLogCardProps) {
   const auditMeta = buildRequestLogAuditMeta(log);
-  // A log is only "in progress" if the trace store still has an active trace.
-  // Without a live trace the request is completed or orphaned.
-  const isInProgress = isPersistedRequestLogInProgress(log) && liveTrace != null;
-  const liveProvider = resolveLiveTraceProvider(liveTrace);
-  const displayDurationMs =
-    isInProgress && liveTrace
-      ? (resolveLiveTraceDurationMs(liveTrace, nowMs) ?? log.duration_ms)
-      : log.duration_ms;
-  const statusBadge = computeStatusBadge({
-    status: log.status,
-    errorCode: log.error_code,
-    inProgress: isInProgress,
-    hasFailover: log.has_failover,
-  });
+  const isInterrupted = activityState === "interrupted";
+  const statusBadge = isInterrupted
+    ? {
+        text: "未完成",
+        semanticText: "请求未完成",
+        tone: "bg-amber-50 text-amber-600 ring-1 ring-inset ring-amber-500/15 dark:bg-amber-500/15 dark:text-amber-400 dark:ring-amber-400/25",
+        title: "请求未完成：历史日志缺少终态，当前网关没有对应的进行中请求",
+        isError: false,
+        isClientAbort: false,
+        hasFailover: log.has_failover,
+      }
+    : computeStatusBadge({
+        status: log.status,
+        errorCode: log.error_code,
+        hasFailover: log.has_failover,
+      });
 
   const providerText =
-    (isInProgress && liveProvider ? liveProvider.providerName : null) ??
     auditMeta.providerFallbackText ??
     (log.final_provider_id === 0 ||
     !log.final_provider_name ||
@@ -229,19 +146,21 @@ const RequestLogCard = memo(function RequestLogCard({
 
   const providerTitle = providerText;
 
-  const modelText = formatClaudeModelMappingText(
+  const modelText = formatModelRedirectText(
     log.requested_model,
-    resolveClaudeModelMappingFromSpecialSettings(log.special_settings_json, log.final_provider_id)
+    resolveModelRedirectFromSpecialSettings(log.special_settings_json, log.final_provider_id)
   );
 
   const cliLabel = cliShortLabel(log.cli_key);
   const cliTone = cliBadgeToneStatic(log.cli_key);
+  const isCodexSystemRequest =
+    log.cli_key === "codex" && hasCodexSystemRequestSpecialSetting(log.special_settings_json);
   const compactTextClass = compactMode ? "whitespace-normal break-all" : "truncate";
 
-  const ttfbMs = sanitizeTtfbMs(log.ttfb_ms, displayDurationMs);
+  const ttfbMs = sanitizeTtfbMs(log.ttfb_ms, log.duration_ms);
   const outputTokensPerSecond = computeOutputTokensPerSecond(
     log.output_tokens,
-    displayDurationMs,
+    log.duration_ms,
     ttfbMs
   );
 
@@ -256,54 +175,33 @@ const RequestLogCard = memo(function RequestLogCard({
   const isPriorityServiceTier =
     log.cli_key === "codex" && hasPriorityServiceTierSpecialSetting(log.special_settings_json);
 
-  const cacheWrite = (() => {
-    // 优先展示有值的 TTL 桶；若都为 0，则仍展示 0 而不是 "—"。
-    if (log.cache_creation_5m_input_tokens != null && log.cache_creation_5m_input_tokens > 0) {
-      return { tokens: log.cache_creation_5m_input_tokens, ttl: "5m" as const };
-    }
-    if (log.cache_creation_1h_input_tokens != null && log.cache_creation_1h_input_tokens > 0) {
-      return { tokens: log.cache_creation_1h_input_tokens, ttl: "1h" as const };
-    }
-    if (log.cache_creation_input_tokens != null && log.cache_creation_input_tokens > 0) {
-      return { tokens: log.cache_creation_input_tokens, ttl: null };
-    }
-    if (log.cache_creation_5m_input_tokens != null) {
-      return { tokens: log.cache_creation_5m_input_tokens, ttl: "5m" as const };
-    }
-    if (log.cache_creation_1h_input_tokens != null) {
-      return { tokens: log.cache_creation_1h_input_tokens, ttl: "1h" as const };
-    }
-    if (log.cache_creation_input_tokens != null) {
-      return { tokens: log.cache_creation_input_tokens, ttl: null };
-    }
-    return { tokens: null as number | null, ttl: null as "5m" | "1h" | null };
-  })();
+  const cacheWrite = resolveCacheCreationDisplay(log);
 
-  const effectiveInputTokens = computeEffectiveInputTokens(
-    log.cli_key,
-    log.input_tokens,
-    log.cache_read_input_tokens
-  );
+  const effectiveInputTokens = log.effective_input_tokens ?? null;
 
   return (
-    <button type="button" onClick={() => onSelectLogId(log.id)} className="w-full text-left group">
+    <button
+      type="button"
+      onClick={() => onSelectLogId(log.id > 0 ? log.id : null)}
+      className="w-full text-left group"
+    >
       <div
         className={cn(
-          "relative transition-all duration-200 group/item mx-2 my-1.5 rounded-lg border",
+          "relative transition-all duration-300 ease-out group/item mx-2 my-1.5 rounded-lg border",
           isSelected
-            ? "bg-indigo-50/50 border-indigo-200/80 shadow-[0_0_0_1px_rgba(99,102,241,0.08),0_2px_8px_rgba(99,102,241,0.1)] dark:bg-indigo-950/30 dark:border-indigo-600/40 dark:shadow-[0_0_0_1px_rgba(99,102,241,0.15),0_2px_8px_rgba(99,102,241,0.12)]"
+            ? "bg-state-selected/65 border-state-selected-border/80 shadow-request-log-selected"
             : auditMeta.muted
-              ? "bg-slate-50/85 border-slate-200/70 hover:bg-slate-100/85 hover:border-slate-300/70 dark:bg-slate-800/70 dark:border-slate-700/80 dark:hover:bg-slate-800/90 dark:hover:border-slate-600/80"
-              : "bg-white/80 border-slate-200/60 hover:bg-slate-50/80 hover:border-slate-300/60 hover:shadow-[0_2px_8px_rgba(15,23,42,0.06)] dark:bg-slate-800/80 dark:border-slate-700/60 dark:hover:bg-slate-750/80 dark:hover:border-slate-600/60 dark:hover:shadow-[0_2px_8px_rgba(0,0,0,0.2)]"
+              ? "bg-surface-inset/60 border-border/30 opacity-75 hover:opacity-100 hover:bg-surface-inset/90 hover:border-border/60 dark:bg-surface-inset/40 dark:border-border/30"
+              : "bg-secondary/35 border-border/40 hover:bg-secondary/65 hover:-translate-y-[0.5px] hover:shadow-request-log-hover dark:bg-secondary/45 dark:border-border/40 dark:hover:bg-secondary/80 dark:hover:border-border/60 dark:hover:shadow-request-log-hover-dark"
         )}
       >
         {/* Selection indicator */}
         <div
           className={cn(
-            "absolute left-0 top-2 bottom-2 w-[3px] rounded-r-full transition-all duration-200",
+            "absolute left-0 top-3 bottom-3 w-[2.5px] rounded-full transition-all duration-300",
             isSelected
-              ? "bg-gradient-to-b from-indigo-500 to-indigo-400 opacity-100 shadow-[2px_0_8px_rgba(99,102,241,0.2)]"
-              : "bg-slate-300 opacity-0 group-hover/item:opacity-50 dark:bg-slate-500"
+              ? "bg-gradient-to-b from-page-accent to-page-secondary shadow-page-accent-soft opacity-100"
+              : "bg-muted opacity-0 group-hover/item:opacity-30 dark:bg-muted"
           )}
         />
 
@@ -328,8 +226,8 @@ const RequestLogCard = memo(function RequestLogCard({
                 )}
                 title={statusBadge.title}
               >
-                {isInProgress ? (
-                  <Loader2 className="h-3 w-3 shrink-0 animate-spin" />
+                {isInterrupted ? (
+                  <Clock className="h-3 w-3 shrink-0" />
                 ) : statusBadge.isError ? (
                   <XCircle className="h-3 w-3 shrink-0" />
                 ) : (
@@ -353,6 +251,14 @@ const RequestLogCard = memo(function RequestLogCard({
                 <span className={compactTextClass}>{modelText}</span>
               </span>
 
+              <ReasoningEffortBadge value={log.reasoning_effort} />
+
+              {isCodexSystemRequest ? (
+                <span className="shrink-0 whitespace-nowrap rounded-md border border-border/60 bg-muted px-2 py-0.5 text-[11px] font-semibold text-foreground">
+                  Codex 系统请求
+                </span>
+              ) : null}
+
               {sessionFolder && (
                 <FolderBadge
                   folderName={sessionFolder.folder_name}
@@ -363,15 +269,13 @@ const RequestLogCard = memo(function RequestLogCard({
 
               {compactMode && (
                 <span
-                  className="inline-flex min-w-0 items-center gap-1 rounded-md bg-slate-100/75 px-2 py-0.5 text-[11px] font-medium text-slate-600 dark:bg-slate-700/55 dark:text-slate-200"
+                  className="inline-flex min-w-0 items-center gap-1 rounded-md bg-muted/65 px-2 py-0.5 text-[11px] font-medium text-muted-foreground border border-border/40 dark:bg-muted/40 dark:border-border/20 shadow-pill-subtle"
                   title={providerTitle}
                 >
-                  <Server className="h-3 w-3 shrink-0 text-slate-400 dark:text-slate-500" />
+                  <Server className="h-3 w-3 shrink-0 text-muted-foreground/60" />
                   <span className={compactTextClass}>{providerText}</span>
                 </span>
               )}
-
-              {log.session_reuse && <SessionReuseBadge showCustomTooltip={showCustomTooltip} />}
 
               {isFree && <FreeBadge />}
 
@@ -397,29 +301,28 @@ const RequestLogCard = memo(function RequestLogCard({
 
             <span
               className={cn(
-                "flex shrink-0 items-center gap-1.5 text-xs text-slate-400 dark:text-slate-500 whitespace-nowrap",
+                "flex shrink-0 items-center gap-1.5 text-xs text-muted-foreground whitespace-nowrap",
                 compactMode ? "self-start" : "ml-auto w-[150px] justify-end"
               )}
             >
-              <Clock className="h-3 w-3 shrink-0" />
-              {formatUnixSeconds(log.created_at)}
+              {log.session_reuse && <SessionReuseBadge showCustomTooltip={showCustomTooltip} />}
+              <span className="flex items-center gap-1 w-[64px] justify-end shrink-0 select-none">
+                <Clock className="h-3 w-3 shrink-0" />
+                <span>{formatUnixSeconds(log.created_at)}</span>
+              </span>
             </span>
           </div>
 
           {!compactMode && auditMeta.summary ? (
-            <div className="mb-1.5 text-[11px] text-slate-500 dark:text-slate-400">
-              {auditMeta.summary}
-            </div>
+            <div className="mb-1.5 text-[11px] text-muted-foreground">{auditMeta.summary}</div>
           ) : null}
 
           {!compactMode && (
             <div className="flex items-start gap-3 text-[11px]">
               <div className="flex flex-col gap-y-0.5 w-[110px] shrink-0" title={providerTitle}>
                 <div className="flex items-center gap-1 h-4">
-                  <Server className="h-3 w-3 text-slate-400/80 dark:text-slate-500/80 shrink-0" />
-                  <span className="truncate font-semibold text-slate-600 dark:text-slate-300">
-                    {providerText}
-                  </span>
+                  <Server className="h-3 w-3 text-muted-foreground/60 shrink-0" />
+                  <span className="truncate font-semibold text-foreground/85">{providerText}</span>
                 </div>
                 <div className="flex items-center h-4">
                   <div className="flex items-center gap-1 min-w-0 w-full">
@@ -430,13 +333,13 @@ const RequestLogCard = memo(function RequestLogCard({
                           contentClassName="max-w-[400px] break-words"
                           placement="top"
                         >
-                          <span className="text-[11px] text-slate-400 dark:text-slate-500 hover:text-indigo-600 dark:hover:text-indigo-400 cursor-help">
+                          <span className="text-[11px] text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400 cursor-help">
                             {routeMeta.label}
                           </span>
                         </Tooltip>
                       ) : (
                         <span
-                          className="text-[11px] text-slate-400 dark:text-slate-500 cursor-help"
+                          className="text-[11px] text-muted-foreground cursor-help"
                           title={routeMeta.tooltipText}
                         >
                           {routeMeta.label}
@@ -445,7 +348,7 @@ const RequestLogCard = memo(function RequestLogCard({
                     ) : null}
 
                     {showCostMultiplier ? (
-                      <span className="inline-flex items-center text-[11px] font-medium text-slate-500 dark:text-slate-400 shrink-0">
+                      <span className="inline-flex items-center text-[11px] font-medium text-muted-foreground shrink-0">
                         {costMultiplierText}
                       </span>
                     ) : null}
@@ -453,88 +356,111 @@ const RequestLogCard = memo(function RequestLogCard({
                 </div>
               </div>
 
-              <div className="grid grid-cols-4 gap-x-3 gap-y-0.5 flex-1 text-slate-500 dark:text-slate-400">
-                <div className="flex items-center gap-1 h-4" title="Input Tokens">
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">输入</span>
-                  <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
-                    {formatInteger(effectiveInputTokens)}
+              <div className="grid grid-cols-4 gap-x-3 gap-y-0.5 flex-1 text-muted-foreground">
+                <div
+                  className="col-start-1 row-start-1 flex items-center gap-1 h-4"
+                  title="Input Tokens"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
+                    输入
+                  </span>
+                  <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
+                    {effectiveInputTokens != null ? formatInteger(effectiveInputTokens) : "—"}
                   </span>
                 </div>
-                <div className="flex items-center gap-1 h-4" title="Cache Write">
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
+                {/* Providers like DeepSeek never report cache creation — still
+                    render 0 so the metric grid stays complete and aligned. */}
+                <div
+                  className="col-start-2 row-start-1 flex items-center gap-1 h-4"
+                  title="Cache Write"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
                     缓存创建
                   </span>
-                  {cacheWrite.tokens != null ? (
-                    <>
-                      <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
-                        {formatInteger(cacheWrite.tokens)}
-                      </span>
-                      {cacheWrite.ttl && cacheWrite.tokens > 0 && (
-                        <span className="text-slate-400/70 dark:text-slate-500/70 text-[10px]">
-                          ({cacheWrite.ttl})
-                        </span>
-                      )}
-                    </>
-                  ) : (
-                    <span className="text-slate-300/60 dark:text-slate-600/60">—</span>
-                  )}
+                  <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
+                    {formatInteger(cacheWrite?.tokens ?? 0)}
+                  </span>
+                  {cacheWrite?.ttl && cacheWrite.tokens > 0 ? (
+                    <span className="text-[10px] font-medium text-muted-foreground/60">
+                      ({cacheWrite.ttl})
+                    </span>
+                  ) : null}
                 </div>
-                <div className="flex items-center gap-1 h-4" title="TTFB">
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">首字</span>
-                  <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                <div className="col-start-3 row-start-1 flex items-center gap-1 h-4" title="TTFB">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
+                    首字
+                  </span>
+                  <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
                     {ttfbMs != null ? formatDurationMs(ttfbMs) : "—"}
                   </span>
                 </div>
                 <div
-                  className="flex items-center gap-1 h-4"
+                  className="col-start-4 row-start-1 flex items-center gap-1 h-4"
                   title={costUsdText === "—" ? undefined : costUsdText}
                 >
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">花费</span>
-                  <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
+                    花费
+                  </span>
+                  <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
                     {costUsdText}
                   </span>
                   {isPriorityServiceTier && <FastModeBadge showCustomTooltip={showCustomTooltip} />}
                 </div>
 
-                <div className="flex items-center gap-1 h-4" title="Output Tokens">
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">输出</span>
-                  <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
-                    {formatInteger(log.output_tokens)}
+                <div
+                  className="col-start-1 row-start-2 flex items-center gap-1 h-4"
+                  title="Output Tokens"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
+                    输出
                   </span>
-                </div>
-                <div className="flex items-center gap-1 h-4" title="Cache Read">
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">
-                    缓存读取
-                  </span>
-                  {log.cache_read_input_tokens != null ? (
-                    <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
-                      {formatInteger(log.cache_read_input_tokens)}
-                    </span>
-                  ) : (
-                    <span className="text-slate-300/60 dark:text-slate-600/60">—</span>
-                  )}
-                </div>
-                <div className="flex items-center gap-1 h-4" title="Duration">
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">耗时</span>
-                  <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
-                    {formatDurationMs(displayDurationMs)}
+                  <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
+                    {log.output_tokens != null ? formatInteger(log.output_tokens) : "—"}
                   </span>
                 </div>
                 <div
-                  className="flex items-center gap-1 h-4"
+                  className="col-start-2 row-start-2 flex items-center gap-1 h-4"
+                  title="Cache Read"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
+                    缓存读取
+                  </span>
+                  <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
+                    {log.cache_read_input_tokens != null
+                      ? formatInteger(log.cache_read_input_tokens)
+                      : "—"}
+                  </span>
+                </div>
+                <div
+                  className="col-start-3 row-start-2 flex items-center gap-1 h-4"
+                  title="Duration"
+                >
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
+                    耗时
+                  </span>
+                  <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
+                    {formatDurationMs(log.duration_ms)}
+                  </span>
+                </div>
+                <div
+                  className="col-start-4 row-start-2 flex items-center gap-1 h-4"
                   title={
                     outputTokensPerSecond != null
                       ? formatTokensPerSecond(outputTokensPerSecond)
                       : undefined
                   }
                 >
-                  <span className="text-slate-400/80 dark:text-slate-500/80 shrink-0">速率</span>
+                  <span className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground/75 select-none shrink-0">
+                    速率
+                  </span>
                   {outputTokensPerSecond != null ? (
-                    <span className="font-mono tabular-nums text-slate-700 dark:text-slate-200 truncate">
+                    <span className="font-mono tabular-nums text-xs font-semibold text-foreground/90 truncate">
                       {formatTokensPerSecondShort(outputTokensPerSecond)}
                     </span>
                   ) : (
-                    <span className="text-slate-300/60 dark:text-slate-600/60">—</span>
+                    <span className="text-muted-foreground/40 text-xs font-mono select-none">
+                      —
+                    </span>
                   )}
                 </div>
               </div>
@@ -546,19 +472,32 @@ const RequestLogCard = memo(function RequestLogCard({
   );
 });
 
+export type HomeRequestLogsDisplayOptions = {
+  customTooltip: boolean;
+  summaryText: boolean;
+  openLogsPageButton: boolean;
+  refreshButton: boolean;
+  compactModeToggle: boolean;
+};
+
+const DEFAULT_HOME_REQUEST_LOGS_DISPLAY_OPTIONS: HomeRequestLogsDisplayOptions = {
+  customTooltip: false,
+  summaryText: true,
+  openLogsPageButton: true,
+  refreshButton: true,
+  compactModeToggle: true,
+};
+
 export type HomeRequestLogsPanelProps = {
-  showCustomTooltip: boolean;
+  displayOptions?: Partial<HomeRequestLogsDisplayOptions>;
   title?: string;
-  showSummaryText?: boolean;
   summaryTextOverride?: string;
-  showOpenLogsPageButton?: boolean;
-  showRefreshButton?: boolean;
-  showCompactModeToggle?: boolean;
   compactModeOverride?: boolean;
   emptyStateTitle?: string;
   devPreviewEnabled?: boolean;
 
   traces: TraceSession[];
+  activeRequests?: ActiveRequestSnapshotItem[];
 
   requestLogs: RequestLogSummary[];
   requestLogsLoading: boolean;
@@ -571,17 +510,14 @@ export type HomeRequestLogsPanelProps = {
 };
 
 export function HomeRequestLogsPanel({
-  showCustomTooltip,
+  displayOptions,
   title,
-  showSummaryText = true,
   summaryTextOverride,
-  showOpenLogsPageButton = true,
-  showRefreshButton = true,
-  showCompactModeToggle = true,
   compactModeOverride,
   emptyStateTitle = "当前没有最近使用记录",
   devPreviewEnabled = false,
   traces,
+  activeRequests = [],
   requestLogs,
   requestLogsLoading,
   requestLogsRefreshing,
@@ -591,6 +527,10 @@ export function HomeRequestLogsPanel({
   onSelectLogId,
 }: HomeRequestLogsPanelProps) {
   const navigate = useNavigate();
+  const resolvedDisplayOptions = {
+    ...DEFAULT_HOME_REQUEST_LOGS_DISPLAY_OPTIONS,
+    ...displayOptions,
+  };
   const [compactMode, setCompactMode] = useState(() => {
     try {
       const stored = localStorage.getItem("home_request_logs_compact");
@@ -620,56 +560,55 @@ export function HomeRequestLogsPanel({
     () => (devPreviewEnabled ? buildPreviewSessionFolderLookups() : []),
     [devPreviewEnabled]
   );
+  const previewActiveRequests = useMemo<ActiveRequestSnapshotItem[]>(
+    () =>
+      previewTraces.map((trace) => ({
+        trace_id: trace.trace_id,
+        cli_key: trace.cli_key,
+        session_id: trace.session_id ?? null,
+        method: trace.method,
+        path: trace.path,
+        query: trace.query,
+        requested_model: trace.requested_model ?? null,
+        created_at_ms: trace.first_seen_ms,
+        last_activity_ms: trace.last_seen_ms,
+        current_attempt: null,
+      })),
+    [previewTraces]
+  );
   const displayedTraces = traces.length > 0 ? traces : previewTraces;
   const displayedRequestLogs = requestLogs.length > 0 ? requestLogs : previewRequestLogs;
-  const displayedTraceIds = useMemo(() => {
-    const ids = new Set<string>();
-    for (const t of displayedTraces) {
-      const id = t.trace_id?.trim();
-      if (id) ids.add(id);
-    }
-    return ids;
-  }, [displayedTraces]);
-  const sortedRequestLogs = useMemo(() => {
-    if (displayedRequestLogs.length <= 1) return displayedRequestLogs;
-    return displayedRequestLogs.slice().sort(makeSortRequestLogsForDisplay(displayedTraceIds));
-  }, [displayedRequestLogs, displayedTraceIds]);
+  const displayedActiveRequests =
+    activeRequests.length > 0 ? activeRequests : previewActiveRequests;
+  const wallClockNowMs = Date.now();
+  const clockEnabled = shouldTickRequestActivityClock({
+    requestLogs: displayedRequestLogs,
+    activeRequests: displayedActiveRequests,
+    traces: displayedTraces,
+    nowMs: wallClockNowMs,
+  });
+  const tickingNowMs = useNowMs(clockEnabled, 250);
+  const nowMs = clockEnabled ? tickingNowMs : wallClockNowMs;
+  const activityProjection = useMemo(
+    () =>
+      buildRequestActivityProjection({
+        requestLogs: displayedRequestLogs,
+        activeRequests: displayedActiveRequests,
+        traces: displayedTraces,
+        nowMs,
+        realtimeCardLimit: 5,
+      }),
+    [displayedActiveRequests, displayedRequestLogs, displayedTraces, nowMs]
+  );
   const summaryText =
     summaryTextOverride ??
     (requestLogsAvailable === false
       ? "数据不可用"
-      : sortedRequestLogs.length === 0 && requestLogsLoading
+      : activityProjection.summaryCount === 0 && requestLogsLoading
         ? "加载中…"
         : requestLogsLoading || requestLogsRefreshing
-          ? `更新中… · 共 ${sortedRequestLogs.length} 条`
-          : `共 ${sortedRequestLogs.length} 条`);
-  const realtimeTraceCandidates = useMemo(() => {
-    const logsByTraceId = new Map<string, RequestLogSummary>();
-    for (const log of sortedRequestLogs) {
-      const traceId = log.trace_id?.trim();
-      if (!traceId) continue;
-      if (!logsByTraceId.has(traceId)) {
-        logsByTraceId.set(traceId, log);
-      }
-    }
-
-    const mergedTraceMap = new Map<string, TraceSession>();
-    for (const trace of displayedTraces) {
-      const traceId = trace.trace_id?.trim();
-      if (!traceId || mergedTraceMap.has(traceId)) continue;
-      mergedTraceMap.set(traceId, mergeTraceWithRequestLog(trace, logsByTraceId.get(traceId)));
-    }
-    // NOTE: We intentionally do NOT create synthetic traces from in-progress
-    // logs that lack a real trace.  The trace store is the authority on whether
-    // a request is still alive.  Without a real trace the request is either
-    // completed or orphaned – synthesizing a fake trace would mask that.
-
-    const nowMs = Date.now();
-    return Array.from(mergedTraceMap.values())
-      .filter((t) => nowMs - t.first_seen_ms < 15 * 60 * 1000)
-      .sort((a, b) => b.first_seen_ms - a.first_seen_ms)
-      .slice(0, 20);
-  }, [displayedTraces, sortedRequestLogs]);
+          ? `更新中… · 共 ${activityProjection.summaryCount} 条`
+          : `共 ${activityProjection.summaryCount} 条`);
   const sessionFolderLookupItems = useMemo(() => {
     const seen = new Set<string>();
     const out: CliSessionsFolderLookupInput[] = [];
@@ -684,15 +623,15 @@ export function HomeRequestLogsPanel({
       out.push({ source: cliKey, session_id: normalized });
     };
 
-    for (const log of sortedRequestLogs) {
-      pushIfNeeded(log.cli_key, log.session_id);
+    for (const row of activityProjection.requestRows) {
+      pushIfNeeded(row.log.cli_key, row.log.session_id ?? row.liveTrace?.session_id);
     }
-    for (const trace of realtimeTraceCandidates) {
-      pushIfNeeded(trace.cli_key, trace.session_id);
+    for (const card of activityProjection.realtimeCards) {
+      pushIfNeeded(card.trace.cli_key, card.trace.session_id);
     }
 
     return out;
-  }, [realtimeTraceCandidates, sortedRequestLogs]);
+  }, [activityProjection]);
   const sessionFolderLookupQuery = useCliSessionsFolderLookupByIdsQuery(sessionFolderLookupItems);
   const sessionFolderLookupBySessionKey = useMemo(() => {
     const map = new Map<string, CliSessionsFolderLookupEntry>();
@@ -708,24 +647,6 @@ export function HomeRequestLogsPanel({
     }
     return map;
   }, [previewSessionFolderLookups, sessionFolderLookupQuery.data]);
-  const liveTracesByTraceId = useMemo(() => {
-    const map = new Map<string, TraceSession>();
-    for (const trace of realtimeTraceCandidates) {
-      const traceId = trace.trace_id?.trim();
-      if (!traceId || map.has(traceId)) continue;
-      map.set(traceId, trace);
-    }
-    return map;
-  }, [realtimeTraceCandidates]);
-  const hasLiveInProgressRequestLogs = useMemo(
-    () =>
-      sortedRequestLogs.some((log) => {
-        if (!isPersistedRequestLogInProgress(log)) return false;
-        return liveTracesByTraceId.has(log.trace_id);
-      }),
-    [liveTracesByTraceId, sortedRequestLogs]
-  );
-  const nowMs = useNowMs(hasLiveInProgressRequestLogs, 250);
 
   return (
     <Card padding="sm" className="flex flex-col gap-3 lg:col-span-7 h-full">
@@ -735,15 +656,15 @@ export function HomeRequestLogsPanel({
         </div>
 
         <div className="flex items-center gap-2">
-          {showSummaryText ? (
-            <div className="text-xs text-slate-500 dark:text-slate-400">{summaryText}</div>
+          {resolvedDisplayOptions.summaryText ? (
+            <div className="text-xs text-muted-foreground">{summaryText}</div>
           ) : null}
-          {showOpenLogsPageButton && (
+          {resolvedDisplayOptions.openLogsPageButton && (
             <Button
               onClick={() => navigate("/logs")}
               variant="ghost"
               size="sm"
-              className="h-8 gap-1 px-2 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+              className="h-8 gap-1 px-2 text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400"
               disabled={requestLogsAvailable === false}
               title="打开代理记录页"
             >
@@ -751,12 +672,12 @@ export function HomeRequestLogsPanel({
               <ArrowUpRight className="h-3.5 w-3.5" />
             </Button>
           )}
-          {showRefreshButton ? (
+          {resolvedDisplayOptions.refreshButton ? (
             <Button
               onClick={onRefreshRequestLogs}
               variant="ghost"
               size="sm"
-              className="h-8 gap-1 px-2 text-slate-500 dark:text-slate-400 hover:text-indigo-600 dark:hover:text-indigo-400"
+              className="h-8 gap-1 px-2 text-muted-foreground hover:text-indigo-600 dark:hover:text-indigo-400"
               disabled={
                 requestLogsAvailable === false || requestLogsLoading || requestLogsRefreshing
               }
@@ -770,9 +691,9 @@ export function HomeRequestLogsPanel({
               />
             </Button>
           ) : null}
-          {showCompactModeToggle ? (
+          {resolvedDisplayOptions.compactModeToggle ? (
             <div className="flex items-center gap-1.5 pl-1">
-              <span className="text-xs text-slate-500 dark:text-slate-400">简洁模式</span>
+              <span className="text-xs text-muted-foreground">简洁模式</span>
               <Switch
                 checked={effectiveCompactMode}
                 onCheckedChange={handleCompactModeChange}
@@ -786,15 +707,14 @@ export function HomeRequestLogsPanel({
 
       <div className="overflow-hidden flex-1 min-h-0 flex flex-col">
         <RequestLogsList
-          realtimeTraceCandidates={realtimeTraceCandidates}
+          realtimeCards={activityProjection.realtimeCards}
           formatUnixSeconds={formatUnixSecondsStable}
-          showCustomTooltip={showCustomTooltip}
+          showCustomTooltip={resolvedDisplayOptions.customTooltip}
           compactMode={effectiveCompactMode}
           folderLookupBySessionKey={sessionFolderLookupBySessionKey}
-          tracesByTraceId={liveTracesByTraceId}
           nowMs={nowMs}
           requestLogsAvailable={requestLogsAvailable}
-          requestLogs={sortedRequestLogs}
+          requestRows={activityProjection.requestRows}
           requestLogsLoading={requestLogsLoading}
           emptyStateTitle={emptyStateTitle}
           selectedLogId={selectedLogId}
@@ -807,15 +727,14 @@ export function HomeRequestLogsPanel({
 
 // Inner list component that conditionally applies virtualization
 type RequestLogsListProps = {
-  realtimeTraceCandidates: TraceSession[];
+  realtimeCards: ProjectedRealtimeCard[];
   formatUnixSeconds: (ts: number) => string;
   showCustomTooltip: boolean;
   compactMode: boolean;
   folderLookupBySessionKey: Map<string, CliSessionsFolderLookupEntry>;
-  tracesByTraceId: Map<string, TraceSession>;
   nowMs: number;
   requestLogsAvailable: boolean | null;
-  requestLogs: RequestLogSummary[];
+  requestRows: ProjectedRequestLogRow[];
   requestLogsLoading: boolean;
   emptyStateTitle: string;
   selectedLogId: number | null;
@@ -823,39 +742,25 @@ type RequestLogsListProps = {
 };
 
 const RequestLogsList = memo(function RequestLogsList({
-  realtimeTraceCandidates,
+  realtimeCards,
   formatUnixSeconds,
   showCustomTooltip,
   compactMode,
   folderLookupBySessionKey,
-  tracesByTraceId,
   nowMs,
   requestLogsAvailable,
-  requestLogs,
+  requestRows,
   requestLogsLoading,
   emptyStateTitle,
   selectedLogId,
   onSelectLogId,
 }: RequestLogsListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
-  const renderedRequestLogs = useMemo(() => {
-    if (realtimeTraceCandidates.length === 0) return requestLogs;
-    const realtimeTraceIds = new Set(
-      realtimeTraceCandidates.map((trace) => trace.trace_id?.trim()).filter(Boolean)
-    );
-    return requestLogs.filter((log) => {
-      if (!isPersistedRequestLogInProgress(log)) return true;
-      const traceId = log.trace_id?.trim();
-      if (!traceId) return true;
-      // Orphaned logs (status=null, no live trace) fall through here because
-      // realtimeTraceIds won't contain their trace_id — they stay in the list.
-      return !realtimeTraceIds.has(traceId);
-    });
-  }, [realtimeTraceCandidates, requestLogs]);
-  const useVirtual = renderedRequestLogs.length >= VIRTUALIZATION_THRESHOLD;
+  const hasRealtimeCards = realtimeCards.length > 0;
+  const useVirtual = requestRows.length >= VIRTUALIZATION_THRESHOLD;
 
   const virtualizer = useVirtualizer({
-    count: renderedRequestLogs.length,
+    count: requestRows.length,
     getScrollElement: () => scrollRef.current,
     estimateSize: () => ESTIMATED_LOG_CARD_HEIGHT,
     overscan: 8,
@@ -865,11 +770,10 @@ const RequestLogsList = memo(function RequestLogsList({
   const virtualItems = virtualizer.getVirtualItems();
 
   // Non-virtualized fallback for small lists
-  const plainList = !useVirtual && renderedRequestLogs.length > 0 && (
+  const plainList = !useVirtual && requestRows.length > 0 && (
     <>
-      {renderedRequestLogs.map((log) => {
-        const trace = tracesByTraceId.get(log.trace_id);
-        const liveNow = trace && isPersistedRequestLogInProgress(log) ? nowMs : 0;
+      {requestRows.map((row) => {
+        const { log, liveTrace: trace } = row;
         const sessionFolder = (() => {
           const key = sessionFolderLookupKey(log.cli_key, log.session_id ?? trace?.session_id);
           return key ? (folderLookupBySessionKey.get(key) ?? null) : null;
@@ -879,8 +783,7 @@ const RequestLogsList = memo(function RequestLogsList({
             compactMode={compactMode}
             key={log.id}
             log={log}
-            liveTrace={trace}
-            nowMs={liveNow}
+            activityState={row.activityState}
             isSelected={selectedLogId === log.id}
             sessionFolder={sessionFolder}
             showCustomTooltip={showCustomTooltip}
@@ -899,21 +802,22 @@ const RequestLogsList = memo(function RequestLogsList({
       <div className="will-change-[height]">
         <RealtimeTraceCards
           folderLookupBySessionKey={folderLookupBySessionKey}
-          traces={realtimeTraceCandidates}
+          cards={realtimeCards}
+          nowMs={nowMs}
           formatUnixSeconds={formatUnixSeconds}
           showCustomTooltip={showCustomTooltip}
         />
       </div>
 
       {requestLogsAvailable === false ? (
-        <div className="p-4 text-sm text-slate-600 dark:text-slate-400">数据不可用</div>
-      ) : renderedRequestLogs.length === 0 ? (
+        <div className="p-4 text-sm text-muted-foreground">数据不可用</div>
+      ) : requestRows.length === 0 ? (
         requestLogsLoading ? (
-          <div className="flex items-center justify-center gap-2 p-4 text-sm text-slate-600 dark:text-slate-400">
+          <div className="flex items-center justify-center gap-2 p-4 text-sm text-muted-foreground">
             <Spinner size="sm" />
             加载中…
           </div>
-        ) : (
+        ) : hasRealtimeCards ? null : (
           <EmptyState title={emptyStateTitle} />
         )
       ) : useVirtual ? (
@@ -934,9 +838,9 @@ const RequestLogsList = memo(function RequestLogsList({
             }}
           >
             {virtualItems.map((virtualRow) => {
-              const vLog = renderedRequestLogs[virtualRow.index];
-              const vTrace = tracesByTraceId.get(vLog.trace_id);
-              const vNow = vTrace && isPersistedRequestLogInProgress(vLog) ? nowMs : 0;
+              const vRow = requestRows[virtualRow.index];
+              const vLog = vRow.log;
+              const vTrace = vRow.liveTrace;
               const sessionFolder = (() => {
                 const key = sessionFolderLookupKey(
                   vLog.cli_key,
@@ -949,8 +853,7 @@ const RequestLogsList = memo(function RequestLogsList({
                   <RequestLogCard
                     compactMode={compactMode}
                     log={vLog}
-                    liveTrace={vTrace}
-                    nowMs={vNow}
+                    activityState={vRow.activityState}
                     isSelected={selectedLogId === vLog.id}
                     sessionFolder={sessionFolder}
                     showCustomTooltip={showCustomTooltip}

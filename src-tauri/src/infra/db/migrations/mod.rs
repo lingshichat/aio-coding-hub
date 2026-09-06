@@ -9,11 +9,18 @@ mod v28_to_v29;
 mod v29_to_v30;
 mod v30_to_v31;
 mod v31_to_v32;
+mod v32_to_v33;
+mod v33_to_v34;
+mod v34_to_v35;
+mod v35_to_v36;
+mod v36_to_v37;
+mod v37_to_v38;
+mod v38_to_v39;
 
 use rusqlite::Connection;
 
-const LATEST_SCHEMA_VERSION: i64 = 32;
-const MAX_COMPAT_SCHEMA_VERSION: i64 = 34;
+const LATEST_SCHEMA_VERSION: i64 = 39;
+const MAX_COMPAT_SCHEMA_VERSION: i64 = 39;
 const MIN_SUPPORTED_SCHEMA_VERSION: i64 = 25;
 
 pub(super) fn apply_migrations(conn: &mut Connection) -> crate::shared::error::AppResult<()> {
@@ -53,6 +60,13 @@ pub(super) fn apply_migrations(conn: &mut Connection) -> crate::shared::error::A
             29 => v29_to_v30::migrate_v29_to_v30(conn)?,
             30 => v30_to_v31::migrate_v30_to_v31(conn)?,
             31 => v31_to_v32::migrate_v31_to_v32(conn)?,
+            32 => v32_to_v33::migrate_v32_to_v33(conn)?,
+            33 => v33_to_v34::migrate_v33_to_v34(conn)?,
+            34 => v34_to_v35::migrate_v34_to_v35(conn)?,
+            35 => v35_to_v36::migrate_v35_to_v36(conn)?,
+            36 => v36_to_v37::migrate_v36_to_v37(conn)?,
+            37 => v37_to_v38::migrate_v37_to_v38(conn)?,
+            38 => v38_to_v39::migrate_v38_to_v39(conn)?,
             v => {
                 tracing::error!(
                     version = v,
@@ -95,6 +109,12 @@ pub(super) fn apply_migrations(conn: &mut Connection) -> crate::shared::error::A
     }
 
     Ok(())
+}
+
+pub(super) fn apply_runtime_ensure_patches(
+    conn: &mut Connection,
+) -> crate::shared::error::AppResult<()> {
+    ensure::apply_ensure_patches(conn)
 }
 
 fn read_user_version(conn: &Connection) -> crate::shared::error::AppResult<i64> {

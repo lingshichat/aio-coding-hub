@@ -1,5 +1,6 @@
-import { act, render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { ProjectedRealtimeCard } from "../../../services/gateway/requestActivityProjection";
 import { RealtimeTraceCards } from "../RealtimeTraceCards";
 
 function traceBase(overrides: Partial<any> = {}) {
@@ -17,13 +18,37 @@ function traceBase(overrides: Partial<any> = {}) {
   };
 }
 
+function cards(traces: any[]): ProjectedRealtimeCard[] {
+  return traces.map((trace) =>
+    trace.summary
+      ? { kind: "settling", trace, activeRequest: null }
+      : {
+          kind: "active",
+          trace,
+          activeRequest: {
+            trace_id: trace.trace_id,
+            cli_key: trace.cli_key,
+            session_id: trace.session_id ?? null,
+            method: trace.method,
+            path: trace.path,
+            query: trace.query ?? null,
+            requested_model: trace.requested_model ?? null,
+            created_at_ms: trace.first_seen_ms,
+            last_activity_ms: trace.last_seen_ms,
+            current_attempt: null,
+          },
+        }
+  );
+}
+
 describe("components/home/RealtimeTraceCards", () => {
-  it("does not start timer when traces list is empty", () => {
+  it("does not start its own timer when cards list is empty", () => {
     const setIntervalSpy = vi.spyOn(window, "setInterval");
     render(
       <RealtimeTraceCards
         folderLookupBySessionKey={new Map()}
-        traces={[]}
+        cards={[]}
+        nowMs={1_700_000_000_000}
         formatUnixSeconds={(ts) => String(ts)}
         showCustomTooltip={false}
       />
@@ -32,12 +57,11 @@ describe("components/home/RealtimeTraceCards", () => {
     setIntervalSpy.mockRestore();
   });
 
-  it("shares the live clock interval across active realtime card mounts", () => {
+  it("does not own a live clock for active realtime cards", () => {
     vi.useFakeTimers();
     const baseTime = 1_700_000_000_000;
     vi.setSystemTime(baseTime);
     const setIntervalSpy = vi.spyOn(window, "setInterval");
-    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
     const activeTrace = traceBase({
       trace_id: "t-active",
       first_seen_ms: baseTime - 100,
@@ -48,7 +72,8 @@ describe("components/home/RealtimeTraceCards", () => {
     const first = render(
       <RealtimeTraceCards
         folderLookupBySessionKey={new Map()}
-        traces={[activeTrace] as any}
+        cards={cards([activeTrace])}
+        nowMs={baseTime}
         formatUnixSeconds={(ts) => String(ts)}
         showCustomTooltip={false}
       />
@@ -56,66 +81,212 @@ describe("components/home/RealtimeTraceCards", () => {
     const second = render(
       <RealtimeTraceCards
         folderLookupBySessionKey={new Map()}
-        traces={[activeTrace] as any}
+        cards={cards([activeTrace])}
+        nowMs={baseTime}
         formatUnixSeconds={(ts) => String(ts)}
         showCustomTooltip={false}
       />
     );
 
-    expect(setIntervalSpy).toHaveBeenCalledTimes(1);
+    expect(setIntervalSpy).not.toHaveBeenCalled();
     first.unmount();
-    expect(clearIntervalSpy).not.toHaveBeenCalled();
     second.unmount();
-    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
 
     setIntervalSpy.mockRestore();
-    clearIntervalSpy.mockRestore();
     vi.useRealTimers();
   });
 
-  it("stops the shared live clock when visible traces age out", () => {
+  it("renders projected completed cards without applying another age filter", () => {
     vi.useFakeTimers();
     const baseTime = 1_700_000_000_000;
     vi.setSystemTime(baseTime);
-    const clearIntervalSpy = vi.spyOn(window, "clearInterval");
 
     render(
       <RealtimeTraceCards
         folderLookupBySessionKey={new Map()}
-        traces={
-          [
-            traceBase({
+        cards={cards([
+          traceBase({
+            trace_id: "t-completed",
+            first_seen_ms: baseTime - 1000,
+            last_seen_ms: baseTime,
+            summary: {
               trace_id: "t-completed",
-              first_seen_ms: baseTime - 1000,
-              last_seen_ms: baseTime,
-              summary: {
-                trace_id: "t-completed",
-                cli_key: "claude",
-                method: "POST",
-                path: "/v1/messages",
-                query: null,
-                status: 200,
-                error_code: null,
-                duration_ms: 100,
-                ttfb_ms: 10,
-              },
-            }),
-          ] as any
-        }
+              cli_key: "claude",
+              method: "POST",
+              path: "/v1/messages",
+              query: null,
+              status: 200,
+              error_code: null,
+              duration_ms: 100,
+              ttfb_ms: 10,
+            },
+          }),
+        ])}
+        nowMs={baseTime + 2_000}
         formatUnixSeconds={(ts) => String(ts)}
         showCustomTooltip={false}
       />
     );
 
-    act(() => {
-      vi.setSystemTime(baseTime + 2_000);
-      vi.advanceTimersByTime(250);
-    });
+    expect(screen.getByText("200 成功")).toBeInTheDocument();
 
-    expect(clearIntervalSpy).toHaveBeenCalledTimes(1);
-
-    clearIntervalSpy.mockRestore();
     vi.useRealTimers();
+  });
+
+  it("shows canonical cache buckets, preserves zero, and does not synthesize abort cache writes", () => {
+    const baseTime = 1_700_000_000_000;
+    const renderCards = (summary: Record<string, unknown>) => (
+      <RealtimeTraceCards
+        folderLookupBySessionKey={new Map()}
+        cards={cards([
+          traceBase({
+            trace_id: "trace-cache-write",
+            cli_key: "codex",
+            requested_model: "gpt-5.6-sol",
+            first_seen_ms: baseTime - 1000,
+            last_seen_ms: baseTime,
+            summary: {
+              trace_id: "trace-cache-write",
+              cli_key: "codex",
+              method: "POST",
+              path: "/v1/responses",
+              query: null,
+              status: 200,
+              error_code: null,
+              duration_ms: 1000,
+              ttfb_ms: 100,
+              ...summary,
+            },
+          }),
+        ])}
+        nowMs={baseTime}
+        formatUnixSeconds={(ts) => String(ts)}
+        showCustomTooltip={false}
+      />
+    );
+    const view = render(
+      renderCards({
+        input_tokens: 1000,
+        effective_input_tokens: 700,
+        output_tokens: 50,
+        cache_read_input_tokens: 100,
+        cache_creation_input_tokens: 200,
+      })
+    );
+
+    const expectMetric = (label: string, value: string) => {
+      const metric = screen.getByText(label).parentElement;
+      expect(metric).not.toBeNull();
+      expect(within(metric as HTMLElement).getByText(value)).toBeInTheDocument();
+      return metric as HTMLElement;
+    };
+    expectMetric("输入", "700");
+    expectMetric("缓存创建", "200");
+    expectMetric("缓存读取", "100");
+
+    view.rerender(
+      renderCards({
+        effective_input_tokens: 700,
+        cache_read_input_tokens: 100,
+        cache_creation_input_tokens: 200,
+        cache_creation_5m_input_tokens: 25,
+        cache_creation_1h_input_tokens: 50,
+      })
+    );
+    expect(within(expectMetric("缓存创建", "25")).getByText("(5m)")).toBeInTheDocument();
+
+    view.rerender(
+      renderCards({
+        effective_input_tokens: 700,
+        cache_read_input_tokens: 100,
+        cache_creation_input_tokens: 0,
+        cache_creation_5m_input_tokens: null,
+        cache_creation_1h_input_tokens: null,
+      })
+    );
+    expectMetric("缓存创建", "0");
+
+    view.rerender(
+      renderCards({
+        effective_input_tokens: 700,
+        cache_read_input_tokens: 100,
+        cache_creation_input_tokens: null,
+        cache_creation_5m_input_tokens: 0,
+        cache_creation_1h_input_tokens: null,
+      })
+    );
+    expect(within(expectMetric("缓存创建", "0")).queryByText("(5m)")).not.toBeInTheDocument();
+
+    view.rerender(
+      renderCards({
+        status: 499,
+        error_code: "GW_STREAM_ABORTED",
+        effective_input_tokens: null,
+        cache_read_input_tokens: null,
+        cache_creation_input_tokens: null,
+        cache_creation_5m_input_tokens: null,
+        cache_creation_1h_input_tokens: null,
+      })
+    );
+    expect(screen.queryByText("缓存创建")).not.toBeInTheDocument();
+  });
+
+  it("keeps in-progress traces visible after five minutes without new events", () => {
+    vi.useFakeTimers();
+    const baseTime = 1_700_000_000_000;
+    vi.setSystemTime(baseTime);
+
+    render(
+      <RealtimeTraceCards
+        folderLookupBySessionKey={new Map()}
+        cards={cards([
+          traceBase({
+            trace_id: "t-long-stream",
+            first_seen_ms: baseTime - 10 * 60 * 1000,
+            last_seen_ms: baseTime - 5 * 60 * 1000 - 1,
+            summary: undefined,
+          }),
+        ])}
+        nowMs={baseTime}
+        formatUnixSeconds={(ts) => String(ts)}
+        showCustomTooltip={false}
+      />
+    );
+
+    expect(screen.getByText("进行中")).toBeInTheDocument();
+    expect(screen.getByText("当前阶段")).toBeInTheDocument();
+
+    vi.useRealTimers();
+  });
+
+  it("uses the latest attempt index when background suppression leaves a sparse attempt list", () => {
+    const baseTime = 1_700_000_000_000;
+    render(
+      <RealtimeTraceCards
+        folderLookupBySessionKey={new Map()}
+        cards={cards([
+          traceBase({
+            trace_id: "t-background-attempt",
+            attempts: [
+              {
+                attempt_index: 3,
+                provider_name: "Provider C",
+                outcome: "started",
+              },
+            ],
+          }),
+        ])}
+        nowMs={baseTime}
+        formatUnixSeconds={(ts) => String(ts)}
+        showCustomTooltip={false}
+      />
+    );
+
+    const attemptMetric = screen.getByText("尝试次数").parentElement;
+    expect(attemptMetric).not.toBeNull();
+    expect(within(attemptMetric as HTMLElement).getByText("3")).toBeInTheDocument();
+    expect(screen.getByText("处理中")).toBeInTheDocument();
+    expect(screen.getByText("Provider C")).toBeInTheDocument();
   });
 
   it("renders in-progress and completed traces, including route and cache hints", () => {
@@ -199,7 +370,8 @@ describe("components/home/RealtimeTraceCards", () => {
             ],
           ])
         }
-        traces={[inProgress, completedError, completedOk] as any}
+        cards={cards([inProgress, completedError, completedOk])}
+        nowMs={baseTime}
         formatUnixSeconds={(ts) => `ts:${ts}`}
         showCustomTooltip={false}
       />
@@ -209,6 +381,19 @@ describe("components/home/RealtimeTraceCards", () => {
     expect(screen.getByText("当前阶段")).toBeInTheDocument();
     expect(screen.getByText("等待首个尝试")).toBeInTheDocument();
     expect(screen.getByText("尝试次数")).toBeInTheDocument();
+    expect(screen.getByText("当前链路")).toBeInTheDocument();
+    const liveMetricCards = ["当前阶段", "尝试次数", "当前链路"].map((label) => {
+      const card = screen.getByText(label).parentElement;
+      expect(card).not.toBeNull();
+      return card as HTMLElement;
+    });
+    expect(liveMetricCards[0].parentElement).toHaveClass("grid-cols-1", "sm:grid-cols-12");
+    expect(liveMetricCards[0]).toHaveClass("sm:col-span-3");
+    expect(liveMetricCards[1]).toHaveClass("sm:col-span-2");
+    expect(liveMetricCards[2]).toHaveClass("sm:col-span-7");
+    for (const card of liveMetricCards) {
+      expect(card).toHaveClass("rounded-lg", "px-2.5", "py-1.5");
+    }
     expect(screen.getByText("workspace-alpha")).toBeInTheDocument();
     expect(screen.getAllByText("未知").length).toBeGreaterThan(0); // model/provider fallback
     expect(screen.getAllByText("P3").length).toBeGreaterThan(0);
@@ -230,23 +415,22 @@ describe("components/home/RealtimeTraceCards", () => {
     render(
       <RealtimeTraceCards
         folderLookupBySessionKey={new Map()}
-        traces={
-          [
-            traceBase({
-              requested_model: "claude-sonnet",
-              first_seen_ms: baseTime - 1000,
-              last_seen_ms: baseTime - 1000,
-              claude_model_mapping: {
-                requestedModel: "claude-sonnet",
-                effectiveModel: "gpt-5.4",
-                mappingKind: "sonnet",
-                providerId: 1,
-                providerName: "Provider A",
-                applied: true,
-              },
-            }),
-          ] as any
-        }
+        cards={cards([
+          traceBase({
+            requested_model: "claude-sonnet",
+            first_seen_ms: baseTime - 1000,
+            last_seen_ms: baseTime - 1000,
+            claude_model_mapping: {
+              requestedModel: "claude-sonnet",
+              effectiveModel: "gpt-5.4",
+              mappingKind: "sonnet",
+              providerId: 1,
+              providerName: "Provider A",
+              applied: true,
+            },
+          }),
+        ])}
+        nowMs={baseTime}
         formatUnixSeconds={(ts) => String(ts)}
         showCustomTooltip={false}
       />
@@ -255,5 +439,44 @@ describe("components/home/RealtimeTraceCards", () => {
     expect(screen.getByText("claude-sonnet → gpt-5.4")).toBeInTheDocument();
 
     vi.useRealTimers();
+  });
+
+  it("shows reasoning effort only after a realtime trace settles", () => {
+    const baseTime = 1_700_000_000_000;
+    const active = traceBase({
+      trace_id: "active",
+      first_seen_ms: baseTime,
+      last_seen_ms: baseTime,
+    });
+    const settling = traceBase({
+      trace_id: "settling",
+      first_seen_ms: baseTime - 1000,
+      last_seen_ms: baseTime,
+      summary: {
+        trace_id: "settling",
+        cli_key: "claude",
+        method: "POST",
+        path: "/v1/messages",
+        query: null,
+        status: 200,
+        error_code: null,
+        duration_ms: 100,
+        ttfb_ms: 10,
+        reasoning_effort: "max",
+      },
+    });
+
+    render(
+      <RealtimeTraceCards
+        folderLookupBySessionKey={new Map()}
+        cards={cards([active, settling])}
+        nowMs={baseTime}
+        formatUnixSeconds={(ts) => String(ts)}
+        showCustomTooltip={false}
+      />
+    );
+
+    expect(screen.getByTitle("思考等级：max")).toHaveTextContent("思考max");
+    expect(screen.getAllByText("思考")).toHaveLength(1);
   });
 });

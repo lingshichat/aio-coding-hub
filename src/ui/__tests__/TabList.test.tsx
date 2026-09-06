@@ -48,13 +48,53 @@ describe("ui/TabList", () => {
     expect(onChange).not.toHaveBeenCalled();
   });
 
-  it("applies primary variant to active tab and ghost to inactive", () => {
+  it("applies active and inactive tab classes", () => {
     render(<TabList ariaLabel="tabs" items={[...defaultItems]} value="tab1" onChange={() => {}} />);
     const tabs = screen.getAllByRole("tab");
-    // Active tab gets primary variant (gradient)
-    expect(tabs[0]).toHaveClass("bg-gradient-to-br");
-    // Inactive tabs get ghost variant
-    expect(tabs[1]).not.toHaveClass("bg-gradient-to-br");
+    expect(tabs[0]).toHaveClass("bg-primary");
+    expect(tabs[1]).not.toHaveClass("bg-primary");
+  });
+
+  it("keeps the default size compact and uses semantic container tokens", () => {
+    render(<TabList ariaLabel="tabs" items={[...defaultItems]} value="tab1" onChange={() => {}} />);
+
+    expect(screen.getByRole("tablist")).toHaveClass("rounded-lg", "border-border", "bg-secondary");
+    expect(screen.getByRole("tab", { name: "Tab One" })).toHaveClass("text-sm", "px-3", "py-1.5");
+    expect(screen.getByRole("tab", { name: "Tab One" })).not.toHaveClass("text-base");
+  });
+
+  it("renders the compact variant with semantic borders and equal columns", () => {
+    render(
+      <TabList
+        ariaLabel="compact tabs"
+        items={[...defaultItems]}
+        value="tab1"
+        onChange={() => {}}
+        variant="compact"
+      />
+    );
+
+    expect(screen.getByRole("tablist")).toHaveClass(
+      "grid",
+      "rounded-lg",
+      "border-border",
+      "bg-secondary"
+    );
+    expect(screen.getByRole("tablist")).toHaveStyle({
+      gridTemplateColumns: "repeat(3, 1fr)",
+    });
+    expect(screen.getByRole("tab", { name: "Tab One" })).toHaveClass("border-border");
+  });
+
+  it("supports keyboard tab navigation", () => {
+    const onChange = vi.fn();
+    render(<TabList ariaLabel="tabs" items={[...defaultItems]} value="tab2" onChange={onChange} />);
+
+    fireEvent.keyDown(screen.getByRole("tablist"), { key: "ArrowRight" });
+    expect(onChange).toHaveBeenCalledWith("tab3");
+
+    fireEvent.keyDown(screen.getByRole("tablist"), { key: "Home" });
+    expect(onChange).toHaveBeenCalledWith("tab1");
   });
 
   it("merges custom className on the container", () => {

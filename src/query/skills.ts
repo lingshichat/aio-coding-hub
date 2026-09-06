@@ -6,6 +6,7 @@ import type { CliKey } from "../services/providers/providers";
 import {
   skillInstall,
   skillRepoDelete,
+  skillRepoDiscoverAvailable,
   skillRepoUpsert,
   skillInstallToLocal,
   skillReposList,
@@ -35,6 +36,19 @@ import {
   validateSkillsWorkspaceId,
 } from "../services/workspace/skills";
 import { skillsKeys } from "./keys";
+
+function mergeDiscoveredRepoRows(
+  current: AvailableSkillSummary[] | undefined,
+  repo: SkillRepoSummary,
+  rows: AvailableSkillSummary[]
+) {
+  return [
+    ...(current ?? []).filter(
+      (row) => row.source_git_url !== repo.git_url || row.source_branch !== repo.branch
+    ),
+    ...rows,
+  ].sort((left, right) => left.name.localeCompare(right.name));
+}
 
 export function useSkillReposListQuery(options?: { enabled?: boolean }) {
   return useQuery({
@@ -99,9 +113,25 @@ export function useSkillsDiscoverAvailableMutation() {
       );
       queryClient.setQueryData<AvailableSkillSummary[]>(skillsKeys.discoverAvailable(false), rows);
     },
-    onSettled: (_res, _err, refresh) => {
-      queryClient.invalidateQueries({ queryKey: skillsKeys.discoverAvailable(refresh ?? false) });
-      queryClient.invalidateQueries({ queryKey: skillsKeys.discoverAvailable(false) });
+  });
+}
+
+export function useSkillRepoDiscoverAvailableMutation() {
+  const queryClient = useQueryClient();
+
+  return useMutation({
+    mutationFn: async (input: { repo: SkillRepoSummary; refresh: boolean }) =>
+      skillRepoDiscoverAvailable({ repoId: input.repo.id, refresh: input.refresh }),
+    onSuccess: (rows, input) => {
+      if (!rows) return;
+      queryClient.setQueryData<AvailableSkillSummary[]>(
+        skillsKeys.discoverAvailable(input.refresh),
+        (current) => mergeDiscoveredRepoRows(current, input.repo, rows)
+      );
+      queryClient.setQueryData<AvailableSkillSummary[]>(
+        skillsKeys.discoverAvailable(false),
+        (current) => mergeDiscoveredRepoRows(current, input.repo, rows)
+      );
     },
   });
 }
@@ -392,17 +422,9 @@ export function useSkillUpdateMutation(workspaceId: number) {
         skillsKeys.installedList(normalizedWorkspaceId),
         (cur) => {
           const prev = cur ?? [];
-          // The skill was uninstalled and reinstalled, so it has a new ID.
-          // We need to replace by matching source info or just add the new one.
-          const filtered = prev.filter(
-            (s) =>
-              !(
-                s.source_git_url === next.source_git_url &&
-                s.source_branch === next.source_branch &&
-                s.source_subdir === next.source_subdir
-              )
-          );
-          return [next, ...filtered];
+          const found = prev.some((s) => s.id === next.id);
+          if (!found) return [next, ...prev];
+          return prev.map((s) => (s.id === next.id ? next : s));
         }
       );
       queryClient.invalidateQueries({ queryKey: skillsKeys.discoverAvailable(false) });
